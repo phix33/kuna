@@ -17,9 +17,9 @@ covered_by_option: null
 touches: [decompiler/crates/kuna-cli/src/litpool.rs, decompiler/crates/kuna-cli/src/disassemble.rs, decompiler/crates/kuna-console/src/engine.rs]
 scope: small
 regression_of: null
-pr: null
+pr: 435
 closed_in_round: 4
-closing_pr: null
+closing_pr: 435
 reject_reason: null
 ---
 

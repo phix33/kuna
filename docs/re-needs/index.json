@@ -4,8 +4,8 @@
   "count": 51,
   "rejected_count": 0,
   "by_status": {
-    "closed": 39,
-    "open": 12
+    "closed": 40,
+    "open": 11
   },
   "by_track": {
     "perf": 2,
@@ -708,7 +708,7 @@
       "need_id": "text-output-silently-ignores",
       "title": "Text output silently ignores a prototype override that JSON output applies",
       "track": "tooling",
-      "status": "open",
+      "status": "closed",
       "severity": "major",
       "probe_id": "p-8cb750f382af",
       "acceptance_id": "a-5a9ec955c9a0",
@@ -731,8 +731,8 @@
       "scope": "small",
       "regression_of": null,
       "pr": null,
-      "closed_in_round": null,
-      "closing_pr": null,
+      "closed_in_round": 4,
+      "closing_pr": "433",
       "reject_reason": null,
       "score": 13.862944,
       "path": "docs/re-needs/text-output-silently-ignores.md"
