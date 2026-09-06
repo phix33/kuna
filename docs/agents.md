@@ -151,7 +151,7 @@ phases are **settable assertions/options** (`--option NAME VALUE`, discovered vi
   `decompiler/crates/kuna-base/src/xml.rs` and requires re-recording
   `docs/baseline-stages.json`. Two such PRs in flight WILL conflict on both; resolve the count
   to base + all merged, and re-record the baseline rather than hand-merging it.
-- Any time any public thing is created fully automatically, it should start with `[AUTOMATED]`. That goes for PRs, Issues (opening and responses). It should also be in the commit message, but can go outside of the tagline and more inside the extended part.
+- Any time any public thing is created fully automatically, it should start with `[AUTOMATED]`. That goes for PRs, Issues (opening and responses), and most importantly replies or comments to issues/PRs. It should also be in the commit message, but can go outside of the tagline and more inside the extended part.
 
 ### PR bodies — three short sections, and lead with the repro
 
