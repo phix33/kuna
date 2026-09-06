@@ -4,8 +4,8 @@
   "count": 51,
   "rejected_count": 0,
   "by_status": {
-    "closed": 38,
-    "open": 13
+    "closed": 39,
+    "open": 12
   },
   "by_track": {
     "perf": 2,
@@ -156,39 +156,6 @@
       "path": "docs/re-needs/explicit-function-boundary-aborts.md"
     },
     {
-      "need_id": "get-pc-helper-loses",
-      "title": "Get-PC helper loses a live stat-buffer argument",
-      "track": "quality",
-      "status": "open",
-      "severity": "major",
-      "probe_id": "p-8980f5aa3c7b",
-      "acceptance_id": "a-1d7268631488",
-      "hypothesis_status": "upheld",
-      "credibility": 1.0,
-      "instances": 2,
-      "challenges": [
-        "5ab77f5833c5d40ad448c399",
-        "68d9ee36224c0ec5dcedc3fc"
-      ],
-      "rounds": [
-        3
-      ],
-      "first_seen_round": 3,
-      "attempts": 0,
-      "covered_by_option": null,
-      "touches": [
-        "decompiler/crates/kuna-decomp/src/p4_calls"
-      ],
-      "scope": "small",
-      "regression_of": null,
-      "pr": null,
-      "closed_in_round": null,
-      "closing_pr": null,
-      "reject_reason": null,
-      "score": 43.944492,
-      "path": "docs/re-needs/get-pc-helper-loses.md"
-    },
-    {
       "need_id": "win32-process-enumeration-loses",
       "title": "Win32 process enumeration loses required call arguments",
       "track": "quality",
@@ -220,6 +187,39 @@
       "reject_reason": null,
       "score": 43.944492,
       "path": "docs/re-needs/win32-process-enumeration-loses.md"
+    },
+    {
+      "need_id": "get-pc-helper-loses",
+      "title": "Get-PC helper loses a live stat-buffer argument",
+      "track": "quality",
+      "status": "open",
+      "severity": "major",
+      "probe_id": "p-8980f5aa3c7b",
+      "acceptance_id": "a-1d7268631488",
+      "hypothesis_status": "upheld",
+      "credibility": 1.0,
+      "instances": 2,
+      "challenges": [
+        "5ab77f5833c5d40ad448c399",
+        "68d9ee36224c0ec5dcedc3fc"
+      ],
+      "rounds": [
+        3
+      ],
+      "first_seen_round": 3,
+      "attempts": 1,
+      "covered_by_option": null,
+      "touches": [
+        "decompiler/crates/kuna-decomp/src/p4_calls"
+      ],
+      "scope": "small",
+      "regression_of": null,
+      "pr": 434,
+      "closed_in_round": null,
+      "closing_pr": null,
+      "reject_reason": null,
+      "score": 29.296328,
+      "path": "docs/re-needs/get-pc-helper-loses.md"
     },
     {
       "need_id": "analysis-generated-function-name",
@@ -711,7 +711,7 @@
       "status": "open",
       "severity": "major",
       "probe_id": "p-8cb750f382af",
-      "acceptance_id": "a-5627f7bb77cf",
+      "acceptance_id": "a-5a9ec955c9a0",
       "hypothesis_status": "upheld",
       "credibility": 0.7,
       "instances": 1,
@@ -1217,39 +1217,6 @@
       "path": "docs/re-needs/disassembling-non-executable-rdata.md"
     },
     {
-      "need_id": "function-disassembly-decodes-arm",
-      "title": "Function disassembly decodes ARM literal-pool data as an instruction",
-      "track": "tooling",
-      "status": "open",
-      "severity": "minor",
-      "probe_id": "p-e6b8fbb0a325",
-      "acceptance_id": "a-19c4b0c635a6",
-      "hypothesis_status": "inconclusive",
-      "credibility": 0.7,
-      "instances": 1,
-      "challenges": [
-        "5ab77f5733c5d40ad448c380"
-      ],
-      "rounds": [
-        3
-      ],
-      "first_seen_round": 3,
-      "attempts": 0,
-      "covered_by_option": null,
-      "touches": [
-        "decompiler/crates/kuna-cli/src/disassemble.rs",
-        "decompiler/crates/kuna-analysis/src/listing"
-      ],
-      "scope": "small",
-      "regression_of": null,
-      "pr": null,
-      "closed_in_round": null,
-      "closing_pr": null,
-      "reject_reason": null,
-      "score": 6.931472,
-      "path": "docs/re-needs/function-disassembly-decodes-arm.md"
-    },
-    {
       "need_id": "getprocaddress-result-discarded",
       "title": "a GetProcAddress result is discarded and the pointer left uninitialised",
       "track": "quality",
@@ -1381,6 +1348,40 @@
       "reject_reason": null,
       "score": 4.620981,
       "path": "docs/re-needs/cold-load-xref-lookup.md"
+    },
+    {
+      "need_id": "function-disassembly-decodes-arm",
+      "title": "Function disassembly decodes ARM literal-pool data as an instruction",
+      "track": "tooling",
+      "status": "closed",
+      "severity": "minor",
+      "probe_id": "p-e6b8fbb0a325",
+      "acceptance_id": "a-19c4b0c635a6",
+      "hypothesis_status": "upheld",
+      "credibility": 0.7,
+      "instances": 1,
+      "challenges": [
+        "5ab77f5733c5d40ad448c380"
+      ],
+      "rounds": [
+        3
+      ],
+      "first_seen_round": 3,
+      "attempts": 1,
+      "covered_by_option": null,
+      "touches": [
+        "decompiler/crates/kuna-cli/src/litpool.rs",
+        "decompiler/crates/kuna-cli/src/disassemble.rs",
+        "decompiler/crates/kuna-console/src/engine.rs"
+      ],
+      "scope": "small",
+      "regression_of": null,
+      "pr": null,
+      "closed_in_round": 4,
+      "closing_pr": null,
+      "reject_reason": null,
+      "score": 4.620981,
+      "path": "docs/re-needs/function-disassembly-decodes-arm.md"
     },
     {
       "need_id": "stack-string-invalid-cast",

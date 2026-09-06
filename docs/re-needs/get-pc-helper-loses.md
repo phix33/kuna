@@ -12,12 +12,12 @@ instances: 2
 challenges: [5ab77f5833c5d40ad448c399, 68d9ee36224c0ec5dcedc3fc]
 rounds: [3]
 first_seen_round: 3
-attempts: 0
+attempts: 1
 covered_by_option: null
 touches: [decompiler/crates/kuna-decomp/src/p4_calls]
 scope: small
 regression_of: null
-pr: null
+pr: 434
 closed_in_round: null
 closing_pr: null
 reject_reason: null
