@@ -4,8 +4,8 @@
   "count": 51,
   "rejected_count": 0,
   "by_status": {
-    "closed": 35,
-    "open": 16
+    "closed": 38,
+    "open": 13
   },
   "by_track": {
     "perf": 2,
@@ -126,7 +126,7 @@
       "need_id": "explicit-function-boundary-aborts",
       "title": "Explicit function boundary aborts on a branch to its exclusive end",
       "track": "quality",
-      "status": "open",
+      "status": "closed",
       "severity": "blocker",
       "probe_id": "p-75d948cd4495",
       "acceptance_id": "a-2eea743fefa7",
@@ -149,8 +149,8 @@
       "scope": "small",
       "regression_of": null,
       "pr": null,
-      "closed_in_round": null,
-      "closing_pr": null,
+      "closed_in_round": 3,
+      "closing_pr": "430",
       "reject_reason": null,
       "score": 65.916737,
       "path": "docs/re-needs/explicit-function-boundary-aborts.md"
@@ -290,7 +290,7 @@
       "need_id": "corrupt-elf-section-table",
       "title": "Corrupt ELF section table blocks analysis despite readable program headers",
       "track": "tooling",
-      "status": "open",
+      "status": "closed",
       "severity": "blocker",
       "probe_id": "p-b0eecb741356",
       "acceptance_id": "a-e4f84764b32f",
@@ -312,8 +312,8 @@
       "scope": "small",
       "regression_of": null,
       "pr": null,
-      "closed_in_round": null,
-      "closing_pr": null,
+      "closed_in_round": 3,
+      "closing_pr": "429",
       "reject_reason": null,
       "score": 20.794415,
       "path": "docs/re-needs/corrupt-elf-section-table.md"
@@ -417,7 +417,7 @@
       "need_id": "arm-literal-pool-string",
       "title": "ARM literal-pool string use has no owning function",
       "track": "tooling",
-      "status": "open",
+      "status": "closed",
       "severity": "major",
       "probe_id": "p-d995eb7a24ba",
       "acceptance_id": "a-763430881ec8",
@@ -440,8 +440,8 @@
       "scope": "small",
       "regression_of": null,
       "pr": null,
-      "closed_in_round": null,
-      "closing_pr": null,
+      "closed_in_round": 3,
+      "closing_pr": "431",
       "reject_reason": null,
       "score": 13.862944,
       "path": "docs/re-needs/arm-literal-pool-string.md"

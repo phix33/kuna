@@ -2,7 +2,7 @@
 need_id: explicit-function-boundary-aborts
 title: Explicit function boundary aborts on a branch to its exclusive end
 track: quality
-status: open
+status: closed
 severity: blocker
 probe_id: p-75d948cd4495
 acceptance_id: a-2eea743fefa7
@@ -18,8 +18,8 @@ touches: [decompiler/crates/kuna-decomp/src/p2_lift]
 scope: small
 regression_of: null
 pr: null
-closed_in_round: null
-closing_pr: null
+closed_in_round: 3
+closing_pr: "430"
 reject_reason: null
 ---
 
@@ -171,3 +171,4 @@ captain T_REFUTE r3: hypothesis upheld -- see ## Refutation (measured on cf5234a
 captain T_TRIAGE r3: track quality and scope small CONFIRMED; touches narrowed to p2_lift (flow/function-boundary). Upheld and narrowed at T_REFUTE: any branch target with no decoded op aborts, measured at four different --define-function ends and identical under --mode reliable and --mode fast. BUILDER: the obvious repair -- drop the unresolvable edge and warn -- is correct HERE and WRONG for default-decompilation-fails-despite, whose missing target is a real in-extent NOP deleted by a phantom entry; do not write one fix for both.
 captain T_TRIAGE r3: repaired the missing probe/acceptance `target` block (binary_rel + sha256 + size, source dataset) -- without it {{BIN}} could not resolve and the need was unclosable by B_DONE and invisible to regression detection. Verified: acceptance now RUNS and FAILS on cf5234ac, which is the state a filed need must be in.
 builder b-r3-explicit-functio r3: FIXED, hypothesis 1 upheld and the captain's narrowing kept. Two changes in `p2_lift/flow.rs`, both inert without a declared extent (`FlowInfo::set_range` is the only narrowing of the flow range, and only a declared extent calls it). (1) The `missing` artificial halt `fillin_branch_stubs` already plants for an out-of-extent address is now registered in `visited` as the instruction there, so `collect_edges` resolves the cut edge to it and the body is clipped under the `Function flows out of bounds` warnings instead of the function dying. Restricted to the addresses `handle_out_of_bounds` recorded, exactly as T_TRIAGE demanded -- `default-decompilation-fails-despite`'s in-extent target keeps upstream's throw and its acceptance still FAILS. (2) Found by the collateral sweep, not by this need: `FlowInfo::fallthru` reported out of bounds when the next address EQUALS `eaddr`, which is the last IN-BODY byte, so a CORRECT declared extent never decoded the function's closing instruction -- `aif_gap_x86_64 sub_1129` came out as an empty `void sub_1129(void)` under a bogus warning instead of `int sub_1129(int a0) { return (a0 + 10) * 2; }`. Measured over 112 in-repo fixtures with every function declared at its derived extent (2,765 functions): bodies differing from the undeclared decompile 403 -> 138, hard errors 142 -> 0; with nothing declared, 112/112 byte-identical. DIV-121, no option.
+- closed: acceptance a-2eea743fefa7 now PASSES at 81013ece3688

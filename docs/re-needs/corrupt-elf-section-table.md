@@ -2,7 +2,7 @@
 need_id: corrupt-elf-section-table
 title: Corrupt ELF section table blocks analysis despite readable program headers
 track: tooling
-status: open
+status: closed
 severity: blocker
 probe_id: p-b0eecb741356
 acceptance_id: a-e4f84764b32f
@@ -18,8 +18,8 @@ touches: [decompiler/crates/kuna-analysis/src/loader]
 scope: small
 regression_of: null
 pr: null
-closed_in_round: null
-closing_pr: null
+closed_in_round: 3
+closing_pr: "429"
 reject_reason: null
 ---
 
@@ -133,3 +133,4 @@ captain T_TRIAGE r3: track tooling CONFIRMED (kind=missing-capability), touches 
 captain T_TRIAGE r3: repaired the missing probe/acceptance `target` block (binary_rel + sha256 + size, source dataset) -- without it {{BIN}} could not resolve and the need was unclosable by B_DONE and invisible to regression detection. Verified: acceptance now RUNS and FAILS on cf5234ac, which is the state a filed need must be in.
 - round 3 REFUTER: hypothesis **overturned** (was inconclusive). Captain refuted BY MEASUREMENT in-tick on the main tree build (kuna 20:01, cf5234ac-era). The filed cause -- 'the loader requires valid section metadata before exploiting program-header mappings' -- is WRONG in its load-bearing half. Measured: (1) the stock probe fails as filed (exit 1, 'Invalid ELF section header offset/size/alignment'); the header is deliberately corrupt -- e_shoff=57005 (0xDEAD), e_shnum=57007, e_shstrndx=47806 -- while the 9 program headers are intact (entry 0x80492d0, LOAD 0x08048000+0x26c6c R E). (2) With e_shoff/e_shnum/e_shstrndx zeroed in a copy, 'kuna functions --json' exits 0 with count=0 -- the tester's second observation reproduces exactly. (3) But 'kuna decompile <copy> --addr 0x80492d0' DECOMPILES CLEANLY (emits sub_80492d0 calling sub_8048c60), so memory mapping already comes from PT_LOAD and needs no sections at all. The real shape is TWO independent gaps: (a) the loader hard-errors on an unusable section table instead of falling back to the program headers, and (b) function DISCOVERY returns nothing without sections even though EntryDiscoveryPass (passes.rs:90, always-on, sources ELF e_entry) should have the entry seed -- i.e. discovery, not mapping, is what yields zero. CONSEQUENCE FOR THE BUILDER: a fix that only tolerates the corrupt table will exit 0 with count=0 and the acceptance probe (count gt 0) STILL FAILS; it must also seed discovery from e_entry and the executable PT_LOAD ranges. Symptom and severity stand; credibility unchanged.
 - round 3 BUILDER (b-r3-corrupt-elf-sect): hypothesis CONFIRMED as the refuter restated it -- two independent gaps, not one. (a) `object::File::parse` validates the section table eagerly, so the loader rejected an image whose program headers were intact; (b) `analyzers/entry::executable_sections` walks `file.sections()` alone, so with no section table the "is this plausible code?" oracle rejected the image's own `e_entry` and discovery returned nothing. Both closed: measured on the dataset original, `kuna functions --json` goes exit 1 / parse error -> exit 0 / count 24, `decompile-all` 24, `strings` 83 (scanned: segments), `disassemble 0x80492d0` 29 instructions. The acceptance target was re-pointed from the dataset binary to a vendored 107-byte twin carrying the same three corrupt header values, so the probe promotes into tests/cli/ and runs in CI, which has no dataset.
+- closed: acceptance a-e4f84764b32f now PASSES at 81013ece3688
