@@ -76,7 +76,7 @@ bridged across the process by environment variables the CLI exports:
 `KUNA_RELOCREBASE` (`relocrebase`), `KUNA_DYNRELOCS` (`dynrelocs`),
 `KUNA_MSVCFPCONST` (`msvcfpconst`), `KUNA_PDATACHAINED` (`pdatachained`),
 `KUNA_MACHO_ARM64E` (`macho-arm64e`),
-`KUNA_MACHO_SLICE` (`--slice`). For those,
+`KUNA_MACHO_SLICE` (`--slice`), `KUNA_ARM_ISA` (`--isa`). For those,
 the option rows exist for discoverability while the live gate is the env var. The
 external-artifact paths `kuna_fid_db` and `kuna_pdb_path` are different: they only
 *locate* the artifact — the `fid`/`pdb` passes stay flag-gated at the deferred
@@ -449,6 +449,28 @@ the section-flag translation, import resolution (§1.3), and extra constant rang
   arm64e auth-rebase handled; bind entries deliberately absent, so a consumer
   misses and falls back rather than reading a wrong address).
 
+An explicit target changes only language selection: the parsed container still
+owns section mapping, image base, symbols, and imports. Container header class is
+independent of decoder instruction width, so ELF32 can be decoded with a 16-bit
+x86 language. An endian disagreement is reported on stderr rather than refused:
+`--target` is the flag that overrides what the container declares, and a
+byte-swapped decode of a mislabeled image is a legitimate use of it. Empty targets
+and the `default` sentinel select the detected architecture and retain the
+compiler-model fallback; the loader and console normalize these requests
+identically.
+This separation lets a recognized container remain loadable when `object` reports
+its architecture as unknown. In particular, PE/COFF machine `0x01c2`
+(`IMAGE_FILE_MACHINE_THUMB`) is treated as little-endian ARM32 for language
+selection and supplies whole-image Thumb context; its sections and PE image base
+still come from the container parser.
+
+Bare THUMB COFF objects use the typed COFF reader before architecture selection:
+the generic `object` magic dispatcher omits machine `0x01c2`. The shared
+`loadimage_object::parse_object` entry point preserves the original machine,
+sections, and symbols, and is also used when analysis or a CLI inspection
+command reopens the image. It retains the typed reader's header and section
+validation; it does not rewrite the machine bytes to another architecture.
+
 ## 1.3 Loader markup
 
 Import naming exists because a CALL into a linkage stub carries no symbol: without
@@ -645,6 +667,29 @@ so the S3 constant-base action emits `COPY #entry -> t9` at the entry block and 
 prologue's `addu gp,gp,t9` folds to a real `$gp`. Both are doubly guarded: the pass
 gates on its architecture, and the commit swallows an unregistered-variable /
 unknown-register error, so a paint on the wrong language is a faithful no-op.
+
+The file front-ends also accept `--isa auto|arm|thumb`. An explicit ARM/Thumb
+choice paints `TMode` across mapped CODE sections before decoding. If an ELF has
+no section headers, it uses executable `PT_LOAD` memory extents, including their
+zero-filled tails; non-executable segments and gaps remain unpainted. `auto` uses
+the marker facts above, Cortex-M evidence, and Thumb-specific PE/COFF machine
+values only when the resolved SLEIGH decoder is ARM32. Inferred container hints
+therefore preserve an explicit non-ARM decoder selection; explicit `arm` or
+`thumb` still fails for a non-ARM decoder. Explicit input state is retained on
+the architecture so later Listing
+and xref painters cannot replace it with ELF markers or Cortex-M metadata.
+The analysis commit applies input paints after all other passes' context facts.
+Before painting, the console checks whether the loaded ARM language exposes `TMode`.
+Fixed-A32 languages without that variable accept explicit `arm` without any paint;
+`thumb` fails with an unsupported-mode diagnostic even if there are no code ranges.
+The generic PE ARM machine (`0x01c0`) is deliberately not a whole-image hint in
+either direction, because such an image may mix ARM and Thumb; the THUMB
+(`0x01c2`) and ARMNT (`0x01c4`) machines are Thumb-only by definition, so those
+two do paint the image, with no flag and no option, where an unflagged run
+previously decoded their bytes as A32. Without mode evidence, decoding uses the
+selected language's default context. `--isa` is refused rather than dropped where
+it could not reach a decode: `strings --no-xrefs` walks no references, so pairing
+the two is a usage error.
 
 ## 1.4 Metadata analyzers
 
@@ -1477,16 +1522,12 @@ either. Ghidra additionally routes an image whose load-config CHPE metadata
 pointer is set to its ARM parser regardless of `Machine`; kuna parses no load
 config, so an ARM64EC image that declares itself `AMD64` still reads at 12.
 
-Two known follow-ups sit on the ARM form. The `BeginAddress` low bit is a Thumb
-marker and the walk currently masks it off to get the address, so on an ARMNT or
-Thumb-2 image the recovered entries carry no decode mode and are decoded as A32 —
-still strictly better than reading the table at the wrong stride, but wrong for
-Thumb. Painting `TMode=1` at a Thumb-marked `BeginAddress` belongs beside the
-Cortex-M whole-image paint, in `ContextPainter::new`
-(`decompiler/crates/kuna-analysis/src/listing/context.rs`) for the walk and in the
-`EntryDiscoveryPass` commit path for the committed facts, which is where
-`cortexm_thumb_paints` already lands. The second is the CHPE routing above. There
-is no ARMNT PE in the corpus to measure either against.
+The object bootstrap paints executable sections as Thumb for THUMB and ARMNT
+machine values, and retains that context through the analysis commit. Per-entry
+mode evidence for a generic ARM header remains a follow-up: the `BeginAddress`
+low bit is masked off by the directory walk without producing a context paint.
+Such a header permits mixed ARM/Thumb code, so its machine value cannot supply a
+whole-image default. CHPE routing also remains a follow-up.
 
 **The widened vector-table signature** (`cortexmvectors`, default-off; kuna;
 `decompiler/crates/kuna-analysis/src/analyzers/entry/kuna_cortexmvectors.rs`)

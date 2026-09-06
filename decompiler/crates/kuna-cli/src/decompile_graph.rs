@@ -7,7 +7,7 @@
 //!                        [--functions a,b,..] [--addr 0xVMA].. [--max-fn-seconds N]
 //!                        [--mode auto|reliable|aggressive|fast]
 //!                        [--define-function S[-E][=N]|@FILE].. [--option N V]..
-//!                        [--slice ARCH] [--target T] [--sleighpath D]
+//!                        [--isa auto|arm|thumb] [--slice ARCH] [--target T] [--sleighpath D]
 //! ```
 //!
 //! One in-process load, like `decompile-all` and `decompile-project` — and the
@@ -176,7 +176,7 @@ fn export(args: &Args, label: &str) -> Result<String, String> {
 
     let bytes = kuna_analysis::loader::elf_shdr::read_image(&args.binary)
         .map_err(|error| format!("{}: {error}", args.binary))?;
-    let file = object::File::parse(&*bytes)
+    let file = kuna_analysis::loadimage_object::parse_object(&*bytes)
         .map_err(|error| format!("could not parse {}: {error}", args.binary))?;
     let graph = CallGraph::build_from(&prog, &file);
     let classifier =
@@ -426,7 +426,7 @@ fn usage() {
          \x20                   [--functions a,b,..] [--addr 0xVMA].. [--max-fn-seconds N] \\\n\
          \x20                   [--mode auto|reliable|aggressive|fast] \\\n\
          \x20                   [--define-function S[-E][=N]|@FILE].. \\\n\
-         \x20                   [--option N V].. [--slice ARCH] [--target T] [--sleighpath D]\n\
+         \x20                   [--option N V].. [--isa auto|arm|thumb] [--slice ARCH] [--target T] [--sleighpath D]\n\
          \n\
          The whole program as one JSON document (schema 4): every discovered\n\
          function with its recovered signature, parameters, C and assembly, plus\n\

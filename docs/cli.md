@@ -475,6 +475,34 @@ Name selection keeps it enabled so generated `sub_<addr>` names can resolve;
 explicitly spelling `--option fast_funcdisc on` opts an address run back into
 that analysis.
 
+`--target <SLEIGH-language-id>` selects the decoder while a recognized object
+container continues to own its section mappings and image base. `--target default`
+requests automatic language selection, including the normal compiler-model fallback.
+The decoder's instruction width, architecture and endianness need not match what
+the container's header declares; for example, ELF32 can carry 16-bit x86 code. An
+endian disagreement is reported on stderr and the requested decoder is still used.
+This also permits a valid PE/COFF image whose machine value is newer than the object
+parser's architecture table to load under an explicit language. PE/COFF machine
+`0x01c2` is recognized directly as little-endian ARM32, including bare COFF
+objects whose machine prefix the generic object parser does not recognize.
+
+`--isa auto|arm|thumb` is available on `decompile`, `decompile-all`,
+`decompile-project`, `decompile-graph`, `functions`, `disassemble`/`read`,
+`strings`, and `xrefs`. It controls ARM32's per-address `TMode`
+context, which a language id alone cannot select. `auto` is the default: kuna
+uses ELF mapping/FUNC markers, Cortex-M metadata, and Thumb-specific PE/COFF
+machine values when the resolved decoder is ARM32. These inferred hints preserve
+an explicit non-ARM `--target`; explicit `--isa arm|thumb` still requires ARM32.
+Explicit `arm` or `thumb` takes precedence over that metadata
+during discovery, cross-reference analysis, and graph assembly as well as
+decompilation. On ELF images without section headers, explicit ISA context covers
+executable `PT_LOAD` ranges. Fixed-A32 languages without `TMode` accept `--isa arm`
+without a context paint and reject `--isa thumb` with a target-selection diagnostic.
+With no mode evidence, decoding uses the selected language's default context; use
+`--isa` to select another mode. `--isa` is refused where it could not apply —
+`strings --no-xrefs` decodes nothing, so the pair is a usage error rather than a
+silently dropped flag.
+
 **Failure contract (DIV-45).** A function whose decompile pipeline aborts is
 *loud*:
 
@@ -1282,8 +1310,8 @@ The project-export face of the same in-process core
 `kuna_console::project` module — the decompile loop + artifact builders also behind the
 web UI's Download-Binary-Source zip and `kuna_wasm project`). Identical
 load-once/decompile-many path and flags —
-`--functions`/`--addr`/`--max-fn-seconds`/`--mode`/`--option`/`--slice`/`--target`/
-`--sleighpath`; no `--json`. Omitted mode is the same size-based `auto` policy
+`--functions`/`--addr`/`--max-fn-seconds`/`--mode`/`--option`/`--isa`/`--slice`/
+`--target`/`--sleighpath`; no `--json`. Omitted mode is the same size-based `auto` policy
 as the other file front-ends. In particular, a project input at least 2 MiB
 automatically suppresses the exhaustive Listing consumers, prologue scan, and
 AIF gap walk through the `fast` preset, while substituting rooted direct-call

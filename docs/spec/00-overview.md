@@ -16,6 +16,12 @@ hand-off, the front-ends, the IR containers, the knowledge plane, the two
 pipeline non-linear. The algorithms themselves live in chapters 01–09; this is how
 they are hosted, ordered, configured, and restarted.
 
+The object-file bootstrap records an explicit ARM/Thumb input selection in
+`Architecture::input_arm_isa_override`. This is an input fact, separate from
+analysis options: metadata painters preserve it when discovery or graph/xref
+commands revisit the code. Context precedence and decoder selection are
+described in chapter 01, §1.3.
+
 ## 0.1 The two tiers
 
 kuna is two engines with one boundary. The **program-preparation tier**
@@ -998,6 +1004,7 @@ variable exported first (`decompiler/crates/kuna-cli/src/decompile_all.rs
 | `KUNA_PDATACHAINED` | `pdatachained` | PE `.pdata` chained-`UNWIND_INFO` entry suppression, `decompiler/crates/kuna-analysis/src/analyzers/entry/pe_entry.rs (pdata_begins)` |
 | `KUNA_MACHO_SLICE` | `--slice` | Mach-O fat-binary slice peel, `decompiler/crates/kuna-console/src/engine.rs (select_macho_slice)` |
 | `KUNA_MACHO_ARM64E` | `macho-arm64e` | arm64e spec selection, `decompiler/crates/kuna-analysis/src/loader/format/macho.rs (MACHO_ARM64E_ENV)` |
+| `KUNA_ARM_ISA` | `--isa` | explicit ARM/Thumb `TMode` selection over the mapped code ranges, `decompiler/crates/kuna-console/src/engine.rs (ARM_ISA_ENV)` |
 
 The matching `option` is still applied afterwards so the run's configuration
 record is honest.

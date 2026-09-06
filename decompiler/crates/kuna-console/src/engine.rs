@@ -1462,7 +1462,12 @@ impl ConsoleProgram {
         // Filter by the per-pass enable flags (default-on, set by the user's
         // `--option <id> on|off`), then merge the survivors in pass order.
         let mut merged = kuna_analysis::pass::AnalysisOutput::default();
+        let mut input_context_paints = Vec::new();
         for (id, out) in pending {
+            if id == "input_isa" {
+                input_context_paints.extend(out.context_paints);
+                continue;
+            }
             if analysis_pass_enabled(self.arch(), id) {
                 merged.merge(out);
             }
@@ -1480,14 +1485,16 @@ impl ConsoleProgram {
         if (want_listing || want_fast_funcdisc || want_operand_refs)
             && self.analysis_image.is_some()
         {
+            let analysis_target = self.arch.arch_id().to_string();
             if let Some((path, bytes)) = self.analysis_image.take() {
                 // A throwaway loadimage just to satisfy the pass contracts (their
                 // `image` arg is unused — the decode reads through `translate`); a
                 // parse failure makes the deferred step a graceful no-op.
-                if let Ok(image) =
-                    kuna_analysis::loadimage_object::ObjectLoadImage::from_bytes_silent(
-                        &path, &bytes,
-                    )
+                if let Ok(image) = ObjectLoadImage::from_bytes_silent_with_target(
+                    &path,
+                    &bytes,
+                    &analysis_target,
+                )
                 {
                     // Deferred Listing build + consumer/fast-inventory run, gated
                     // on the matching option. The call-fixup seed list is the names
@@ -1544,6 +1551,7 @@ impl ConsoleProgram {
             &mut merged.entries,
             &fde_bodies,
         );
+        merged.context_paints.extend(input_context_paints);
         commit_analysis_output(self, &code_space, merged)
     }
 }
@@ -2020,6 +2028,84 @@ pub fn bootstrap_program(
     Ok(prog)
 }
 
+/// Environment bridge for the CLI's explicit ARM decode-mode override.
+pub const ARM_ISA_ENV: &str = "KUNA_ARM_ISA";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmIsa {
+    Arm,
+    Thumb,
+}
+
+impl ArmIsa {
+    pub fn parse(value: &str) -> Result<Option<Self>, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(None),
+            "arm" => Ok(Some(Self::Arm)),
+            "thumb" => Ok(Some(Self::Thumb)),
+            _ => Err(format!(
+                "invalid --isa value {value:?} (expected auto, arm, or thumb)"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Arm => "arm",
+            Self::Thumb => "thumb",
+        }
+    }
+
+    fn context_value(self) -> u32 {
+        match self {
+            Self::Arm => 0,
+            Self::Thumb => 1,
+        }
+    }
+}
+
+fn input_isa_paints(
+    loader: &ObjectLoadImage,
+    arch: &Architecture,
+    arch_id: &str,
+    isa: Option<ArmIsa>,
+) -> KunaResult<Vec<kuna_analysis::pass::ContextPaint>> {
+    let Some(isa) = isa else {
+        return Ok(Vec::new());
+    };
+    if !arch_id.starts_with("ARM:") {
+        return Err(KunaError::lowlevel(format!(
+            "--isa {} requires a 32-bit ARM SLEIGH target (resolved {arch_id})",
+            isa.as_str()
+        )));
+    }
+    if !arch.with_context_db_mut(|db| db.get_variable(b"TMode").is_ok()) {
+        return match isa {
+            ArmIsa::Arm => Ok(Vec::new()),
+            ArmIsa::Thumb => Err(KunaError::lowlevel(format!(
+                "ARM SLEIGH target {arch_id} does not support Thumb decoding; select a Thumb-capable --target"
+            ))),
+        };
+    }
+
+    Ok(loader
+        .executable_ranges()
+        .into_iter()
+        .filter_map(|(addr, size)| {
+            if size == 0 {
+                return None;
+            }
+            let end = addr.checked_add(size)?;
+            Some(kuna_analysis::pass::ContextPaint {
+                addr,
+                end: Some(end),
+                var: "TMode",
+                value: isa.context_value(),
+            })
+        })
+        .collect())
+}
+
 /// Bootstrap a [`ConsoleProgram`] from a **real object-format** binary on disk
 /// (the kuna analog of the C++ console's BFD path: `LoadImageBfd` +
 /// `RawBinaryArchitecture`/the resolved arch).
@@ -2036,14 +2122,34 @@ pub fn bootstrap_program(
 /// loader to the engine.
 ///
 /// `target` is an optional explicit language id (the `load file <target> <path>`
-/// first token, C++ BFD target): when non-empty it overrides the object-derived
-/// id (so an unmapped machine can still be driven), exactly as the C++
+/// first token, C++ BFD target): empty or `default` requests automatic selection;
+/// other values override the object-derived id (so an unmapped machine can still
+/// be driven), exactly as the C++
 /// `getTarget()` path takes precedence over the loader's arch type.
 pub fn bootstrap_from_object(
     path: &str,
     target: &str,
     spec_roots: &[String],
 ) -> KunaResult<ConsoleProgram> {
+    let isa = std::env::var(ARM_ISA_ENV)
+        .ok()
+        .map(|value| ArmIsa::parse(&value))
+        .transpose()
+        .map_err(KunaError::lowlevel)?
+        .flatten();
+    bootstrap_from_object_with_isa(path, target, spec_roots, isa)
+}
+
+/// Explicit-input-context form of [`bootstrap_from_object`]. Front-ends use
+/// this to avoid process-global state; the interactive console wrapper above
+/// retains the environment bridge used by `load file`.
+pub fn bootstrap_from_object_with_isa(
+    path: &str,
+    target: &str,
+    spec_roots: &[String],
+    isa: Option<ArmIsa>,
+) -> KunaResult<ConsoleProgram> {
+    let target = kuna_analysis::loadimage_object::explicit_language_target(target).unwrap_or("");
     let registry = build_registry();
 
     // Read the image bytes once: reused for the loader AND the analysis-pass
@@ -2082,8 +2188,13 @@ pub fn bootstrap_from_object(
     if let Some(note) = datadir_note {
         eprintln!("[kuna] {note}");
     }
+    let explicit_isa = isa.is_some();
     // LoadImageBfd(filename) + open(): parse the ELF (machine, segments, symbols).
-    let mut loader = ObjectLoadImage::from_bytes(path, &bytes)?;
+    let mut loader = if target.trim().is_empty() {
+        ObjectLoadImage::from_bytes(path, &bytes)?
+    } else {
+        ObjectLoadImage::from_bytes_with_target(path, &bytes, target)?
+    };
 
     // resolveArchitecture: the arch id is the loader's getArchType() (the object
     // machine → SLEIGH language id), unless an explicit target overrides it.
@@ -2146,6 +2257,36 @@ pub fn bootstrap_from_object(
     );
     loader.attach_to_space(Rc::clone(&code_space));
 
+    let isa = isa.or_else(|| {
+        let language = sleigh.arch_id();
+        if !language.starts_with("ARM:") || language.split(':').nth(2) != Some("32") {
+            return None;
+        }
+        let file = kuna_analysis::loadimage_object::parse_object(&*bytes).ok()?;
+        kuna_analysis::loadimage_object::arm_isa_hint(&file, &bytes).map(|thumb| {
+            if thumb {
+                ArmIsa::Thumb
+            } else {
+                ArmIsa::Arm
+            }
+        })
+    });
+    let input_context_paints =
+        input_isa_paints(&loader, sleigh.base().unwrap(), sleigh.arch_id(), isa)?;
+    sleigh.base_mut().unwrap().input_arm_isa_override = explicit_isa;
+    for paint in &input_context_paints {
+        let begin = Address::new(Rc::clone(&code_space), paint.addr);
+        let end = paint
+            .end
+            .map(|end| Address::new(Rc::clone(&code_space), end));
+        sleigh.base().unwrap().with_context_db_mut(|db| match end {
+            Some(end) => {
+                db.set_variable_region(paint.var.as_bytes(), &begin, &end, paint.value)
+            }
+            None => db.set_variable(paint.var.as_bytes(), &begin, paint.value),
+        })?;
+    }
+
     // Architecture::fillinReadOnlyFromLoader on the ELF path (the analog of the
     // XML path's collect-before-handoff above): gather the loader's read-only
     // ranges while the image is still in hand. Load-bearing for string rendering
@@ -2174,7 +2315,7 @@ pub fn bootstrap_from_object(
     // conflict #4, analysis-port-log.md). Bound to the real-ELF path ONLY — the
     // XML <binaryimage> bootstrap never runs these, so the datatest parity oracle
     // is structurally untouched.
-    let pending_analysis = kuna_analysis::passes::run_default_analyses_per_pass(
+    let mut pending_analysis = kuna_analysis::passes::run_default_analyses_per_pass(
         &bytes,
         &loader,
         sleigh.base().unwrap(),
@@ -2184,6 +2325,11 @@ pub fn bootstrap_from_object(
         // `Listing::build` can decode through it. Default-off ⇒ unused.
         sleigh.base().unwrap().translate(),
     );
+    if !input_context_paints.is_empty() {
+        let mut explicit = kuna_analysis::pass::AnalysisOutput::default();
+        explicit.context_paints = input_context_paints;
+        pending_analysis.push(("input_isa", explicit));
+    }
 
     // (kuna `dynrelocs`) The PT_GNU_RELRO-frozen dynamic-relocation slots, read
     // off the same loader while it is still in hand. `readonly_ranges` above
@@ -2964,6 +3110,7 @@ const COFF_MACHINES: &[u16] = &[
     0x014c, // IMAGE_FILE_MACHINE_I386
     0x8664, // IMAGE_FILE_MACHINE_AMD64
     0x01c0, // IMAGE_FILE_MACHINE_ARM
+    0x01c2, // IMAGE_FILE_MACHINE_THUMB
     0x01c4, // IMAGE_FILE_MACHINE_ARMNT (Thumb-2)
     0xaa64, // IMAGE_FILE_MACHINE_ARM64
 ];

@@ -227,6 +227,8 @@ pub struct ObjectLoadImage {
     /// backs; this records each segment's whole RAM footprint. Empty for an
     /// `ET_REL` load, which has no program headers.
     segment_info: Vec<SectionInfo>,
+    /// Executable ELF segment extents, used when section headers are absent.
+    executable_segments: Vec<(u64, u64)>,
     /// Function symbols, in symbol-table order.
     funcsyms: Vec<FuncSym>,
     /// Relocatable-object section coordinates. Empty for linked images.
@@ -365,22 +367,43 @@ impl ObjectLoadImage {
 
     /// Open from an in-memory image (the testable core of [`Self::open`]).
     pub fn from_bytes(filename: &str, bytes: &[u8]) -> KunaResult<ObjectLoadImage> {
-        Self::from_bytes_with_diagnostics(filename, bytes, true)
+        Self::from_bytes_with_diagnostics(filename, bytes, true, None)
+    }
+
+    /// Open an object while letting an explicit SLEIGH language select the
+    /// decoder. The recognized container still supplies all image mappings.
+    pub fn from_bytes_with_target(
+        filename: &str,
+        bytes: &[u8],
+        target: &str,
+    ) -> KunaResult<ObjectLoadImage> {
+        Self::from_bytes_with_diagnostics(filename, bytes, true, Some(target))
     }
 
     /// Reconstruct a load image for an internal analysis consumer without
     /// repeating diagnostics already emitted by the primary load.
     pub fn from_bytes_silent(filename: &str, bytes: &[u8]) -> KunaResult<ObjectLoadImage> {
-        Self::from_bytes_with_diagnostics(filename, bytes, false)
+        Self::from_bytes_with_diagnostics(filename, bytes, false, None)
+    }
+
+    /// Silent counterpart of [`Self::from_bytes_with_target`] for an internal
+    /// analysis-side reconstruction of the primary load.
+    pub fn from_bytes_silent_with_target(
+        filename: &str,
+        bytes: &[u8],
+        target: &str,
+    ) -> KunaResult<ObjectLoadImage> {
+        Self::from_bytes_with_diagnostics(filename, bytes, false, Some(target))
     }
 
     fn from_bytes_with_diagnostics(
         filename: &str,
         bytes: &[u8],
         emit_diagnostics: bool,
+        target: Option<&str>,
     ) -> KunaResult<ObjectLoadImage> {
         // Parse the object file.
-        let file = object::File::parse(bytes).map_err(|e| {
+        let file = parse_object(bytes).map_err(|e| {
             KunaError::lowlevel(format!(
                 "File: {filename} : not in recognized object file format: {e}"
             ))
@@ -394,12 +417,29 @@ impl ObjectLoadImage {
         // here), so no behavior changes.
         let fmt = crate::loader::format::detect(&file)?;
 
-        let archtype = language_id_for(&file, fmt.as_ref(), bytes, filename)?;
+        let target = target.and_then(explicit_language_target);
+        if emit_diagnostics {
+            if let Some(note) = target.and_then(|t| target_endian_note(&file, t)) {
+                eprintln!("[kuna target] {filename}: {note}");
+            }
+        }
+        let effective_arch = effective_architecture(&file, bytes);
+        let archtype = language_id_for(
+            &file,
+            fmt.as_ref(),
+            bytes,
+            filename,
+            effective_arch,
+            target,
+        )?;
         // (kuna §2.2) The default-model fallback id: the same arch/endian stem
         // with the model dropped to the per-arch default. If the format's chosen
         // model (e.g. PE's `:windows`) isn't vendored for this arch, the engine
         // retries with this before erroring.
-        let fallback_archtype = fallback_language_id(&file, &archtype);
+        let fallback_archtype = target
+            .is_none()
+            .then(|| fallback_language_id(&file, effective_arch, &archtype))
+            .flatten();
 
         // (kuna) Relocatable-object (`.o` / `.obj`) path: a pre-link object does
         // not say where its bytes live.  An ELF `ET_REL` has no `PT_LOAD` program
@@ -419,6 +459,7 @@ impl ObjectLoadImage {
                 &file,
                 fmt.as_ref(),
                 archtype,
+                fallback_archtype,
                 emit_diagnostics,
             );
         }
@@ -431,8 +472,14 @@ impl ObjectLoadImage {
         // path exactly as an unmapped gap would (BFD `SEC_LOAD`-less sections).
         let mut segments: Vec<Segment> = Vec::new();
         let mut segment_info: Vec<SectionInfo> = Vec::new();
+        let mut executable_segments = Vec::new();
         for seg in file.segments() {
             let vma = seg.address();
+            if matches!(seg.flags(), object::SegmentFlags::Elf { p_flags }
+                if p_flags & object::elf::PF_X != 0)
+            {
+                executable_segments.push((vma, seg.size()));
+            }
             let data = seg.data().map_err(|e| {
                 KunaError::lowlevel(format!("File: {filename} : unreadable segment data: {e}"))
             })?;
@@ -609,6 +656,7 @@ impl ObjectLoadImage {
             segments,
             sections,
             segment_info,
+            executable_segments,
             funcsyms,
             reloc_sections: Vec::new(),
             reloc_symbols: Vec::new(),
@@ -634,6 +682,7 @@ impl ObjectLoadImage {
         file: &object::File,
         fmt: &dyn crate::loader::format::ObjectFormat,
         archtype: Vec<u8>,
+        fallback_archtype: Option<Vec<u8>>,
         emit_diagnostics: bool,
     ) -> KunaResult<ObjectLoadImage> {
         use crate::loader::reloc_object;
@@ -691,10 +740,6 @@ impl ObjectLoadImage {
             }
         }
 
-        // (kuna §2.2) Same default-model fallback id as the linked path: the
-        // arch/endian stem with the model dropped to the per-arch default.
-        let fallback_archtype = fallback_language_id(file, &archtype);
-
         Ok(ObjectLoadImage {
             filename: filename.to_string(),
             archtype,
@@ -704,6 +749,7 @@ impl ObjectLoadImage {
             // No program headers on a relocatable object: the section table is
             // the only mapping story it has, and it always has one.
             segment_info: Vec::new(),
+            executable_segments: Vec::new(),
             funcsyms,
             reloc_sections,
             reloc_symbols,
@@ -754,6 +800,19 @@ impl ObjectLoadImage {
     /// `kuna_sleigh::loadimage::section_flags::*`.
     pub fn section_snapshot(&self) -> Vec<(u64, u64, u32)> {
         self.sections.iter().map(|s| (s.vma, s.size, s.flags)).collect()
+    }
+
+    /// Executable `(vma, size)` extents. Sectionless ELF images use PF_X
+    /// PT_LOAD ranges, including their in-memory tails.
+    pub fn executable_ranges(&self) -> Vec<(u64, u64)> {
+        if self.sections.is_empty() {
+            return self.executable_segments.clone();
+        }
+        self.sections
+            .iter()
+            .filter(|s| s.flags & section_flags::CODE != 0)
+            .map(|s| (s.vma, s.size))
+            .collect()
     }
 
     /// (kuna) The `[start, stop]` (inclusive) ranges whose contents fold to a
@@ -1064,6 +1123,9 @@ impl LoadImage for ObjectLoadImage {
         for s in &mut self.segment_info {
             s.vma = s.vma.wadd(badjust);
         }
+        for (vma, _) in &mut self.executable_segments {
+            *vma = vma.wadd(badjust);
+        }
         for s in &mut self.funcsyms {
             s.addr = s.addr.wadd(badjust);
         }
@@ -1105,10 +1167,14 @@ fn language_id_for(
     fmt: &dyn crate::loader::format::ObjectFormat,
     bytes: &[u8],
     filename: &str,
+    arch: Architecture,
+    target: Option<&str>,
 ) -> KunaResult<Vec<u8>> {
+    if let Some(target) = target {
+        return Ok(target.as_bytes().to_vec());
+    }
     let little = file.is_little_endian();
     let endian = if little { "LE" } else { "BE" };
-    let arch = file.architecture();
     // (PR-8 §3.7) Pointer-auth arm64e spec selection, GATED + opt-in: an arm64e
     // Mach-O (`cpusubtype` CPU_SUBTYPE_ARM64E) selects the Apple-Silicon SLEIGH
     // spec (`AARCH64:LE:64:AppleSilicon`) instead of the generic v8A. This is the
@@ -1145,14 +1211,99 @@ fn language_id_for(
 /// PE's `:windows`) is not vendored for this arch, falling back to the arch
 /// default beats erroring out — wrong calling-convention details still yield a
 /// decompile.
-fn fallback_language_id(file: &object::File, primary: &[u8]) -> Option<Vec<u8>> {
+fn fallback_language_id(
+    file: &object::File,
+    arch: Architecture,
+    primary: &[u8],
+) -> Option<Vec<u8>> {
     let endian = if file.is_little_endian() { "LE" } else { "BE" };
-    let fallback = compose_language_id(file.architecture(), endian, None)?;
+    let fallback = compose_language_id(arch, endian, None)?;
     if fallback.as_bytes() == primary {
         None
     } else {
         Some(fallback.into_bytes())
     }
+}
+
+const IMAGE_FILE_MACHINE_THUMB: u16 = 0x01c2;
+const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
+
+/// Parse an object, including bare THUMB COFF omitted by `object`'s magic dispatch.
+pub fn parse_object(bytes: &[u8]) -> object::read::Result<object::File<'_>> {
+    if bytes.starts_with(&IMAGE_FILE_MACHINE_THUMB.to_le_bytes()) {
+        object::read::coff::CoffFile::parse(bytes).map(object::File::Coff)
+    } else {
+        object::File::parse(bytes)
+    }
+}
+
+/// Architecture used for language selection when the neutral parser does not
+/// recognize a container's machine value. PE/COFF machine `0x01c2` is the
+/// documented 32-bit little-endian Thumb/ARM code value.
+pub fn effective_architecture(file: &object::File, bytes: &[u8]) -> Architecture {
+    let parsed = file.architecture();
+    if parsed != Architecture::Unknown {
+        return parsed;
+    }
+    let machine = container_machine(file, bytes);
+    if machine == Some(IMAGE_FILE_MACHINE_THUMB) {
+        Architecture::Arm
+    } else {
+        parsed
+    }
+}
+
+/// Container-level ARM decode-mode evidence. The PE/COFF machine values for
+/// THUMB and ARMNT describe Thumb instruction streams. The older ARM value can
+/// describe mixed ARM/Thumb images, so it is deliberately not a whole-image
+/// hint. Other formats and machines provide no whole-image hint.
+pub fn arm_isa_hint(file: &object::File, bytes: &[u8]) -> Option<bool> {
+    match container_machine(file, bytes)? {
+        IMAGE_FILE_MACHINE_THUMB | IMAGE_FILE_MACHINE_ARMNT => Some(true),
+        _ => None,
+    }
+}
+
+fn container_machine(file: &object::File, bytes: &[u8]) -> Option<u16> {
+    match file.format() {
+        object::BinaryFormat::Pe => pe_machine(bytes),
+        object::BinaryFormat::Coff => bytes
+            .get(..2)
+            .map(|raw| u16::from_le_bytes([raw[0], raw[1]])),
+        _ => None,
+    }
+}
+
+fn pe_machine(bytes: &[u8]) -> Option<u16> {
+    let pe_offset = u32::from_le_bytes(bytes.get(0x3c..0x40)?.try_into().ok()?) as usize;
+    if bytes.get(pe_offset..pe_offset.checked_add(4)?)? != b"PE\0\0" {
+        return None;
+    }
+    let machine = bytes.get(pe_offset.checked_add(4)?..pe_offset.checked_add(6)?)?;
+    Some(u16::from_le_bytes([machine[0], machine[1]]))
+}
+
+/// Empty input and the `default` sentinel request container-derived selection,
+/// including the normal compiler-model fallback.
+pub fn explicit_language_target(target: &str) -> Option<&str> {
+    match target.trim() {
+        "" | "default" => None,
+        target => Some(target),
+    }
+}
+
+/// An explicit target whose endian field contradicts the container's. Reported,
+/// not refused: `--target` overrides what the container declares, and forcing a
+/// byte-swapped decode of a mislabeled image is a legitimate use of it.
+fn target_endian_note(file: &object::File, target: &str) -> Option<String> {
+    let endian = target
+        .split(':')
+        .nth(1)
+        .filter(|value| matches!(*value, "LE" | "BE"))?;
+    let container = if file.is_little_endian() { "LE" } else { "BE" };
+    (endian != container).then(|| {
+        format!("target {target:?} is {endian}-endian but the container is {container}-endian")
+    })
 }
 
 /// Compose the SLEIGH language id from the format-neutral `arch` + `endian`
@@ -1308,6 +1459,43 @@ pub fn coff_language_ids() -> Vec<(String, Option<String>)> {
 mod tests {
     use super::*;
     use kuna_base::space::{addrspace_flags, spacetype, AddrSpaceManager, ConstantSpace};
+
+    #[test]
+    fn executable_ranges_use_sectionless_load_segments_and_rebase() {
+        let mut bytes = build_elf64(0x1000, &[0x90, 0xc3], None);
+        bytes[40..48].fill(0); // e_shoff
+        bytes[58..64].fill(0); // e_shentsize, e_shnum, e_shstrndx
+        bytes[104..112].copy_from_slice(&16u64.to_le_bytes()); // p_memsz, including zero-fill
+        let mut image = ObjectLoadImage::from_bytes("synthetic", &bytes).unwrap();
+        assert!(image.section_snapshot().is_empty());
+        assert_eq!(image.executable_ranges(), vec![(0x1000, 16)]);
+        image.attach_to_space(Rc::clone(manager().get_default_code_space().unwrap()));
+        image.adjust_vma(0x2000);
+        assert_eq!(image.executable_ranges(), vec![(0x3000, 16)]);
+
+        bytes[68..72].copy_from_slice(&object::elf::PF_R.to_le_bytes());
+        let image = ObjectLoadImage::from_bytes("synthetic", &bytes).unwrap();
+        assert!(
+            image.executable_ranges().is_empty(),
+            "non-executable PT_LOAD was included"
+        );
+
+        bytes[68..72].copy_from_slice(&(object::elf::PF_R | object::elf::PF_X).to_le_bytes());
+        bytes[64..68].copy_from_slice(&object::elf::PT_NOTE.to_le_bytes());
+        let image = ObjectLoadImage::from_bytes("synthetic", &bytes).unwrap();
+        assert!(
+            image.executable_ranges().is_empty(),
+            "non-loadable segment was included"
+        );
+    }
+
+    #[test]
+    fn executable_ranges_prefer_sections_to_broader_segments() {
+        let mut bytes = build_elf64(0x1000, &[0x90, 0xc3], None);
+        bytes[104..112].copy_from_slice(&16u64.to_le_bytes());
+        let image = ObjectLoadImage::from_bytes("synthetic", &bytes).unwrap();
+        assert_eq!(image.executable_ranges(), vec![(0x1000, 2)]);
+    }
 
     /// const(0) + ram(1) processor space (little endian, 8-byte addresses).
     fn manager() -> AddrSpaceManager {
@@ -1559,6 +1747,146 @@ mod tests {
     fn non_elf_is_rejected() {
         let err = ObjectLoadImage::from_bytes("x", b"not an object file").unwrap_err();
         assert!(matches!(err, KunaError::Lowlevel { .. }));
+    }
+
+    #[test]
+    fn thumb_machine_pe_maps_with_explicit_language() {
+        let path = format!(
+            "{}/tests/fixtures/armv4t_thumb_pe.exe",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("read synthetic ARM PE fixture");
+        let file = object::File::parse(bytes.as_slice()).expect("parse synthetic ARM PE");
+        assert_eq!(file.architecture(), Architecture::Unknown);
+        assert_eq!(effective_architecture(&file, &bytes), Architecture::Arm);
+        assert_eq!(arm_isa_hint(&file, &bytes), Some(true));
+
+        let mut image = ObjectLoadImage::from_bytes_with_target(
+            &path,
+            &bytes,
+            "ARM:LE:32:v4t:default",
+        )
+        .expect("explicit language must not discard PE mappings");
+        assert_eq!(image.get_arch_type(), b"ARM:LE:32:v4t:default");
+        let m = manager();
+        let ram = Rc::clone(m.get_space_by_name("ram").unwrap());
+        image.attach_to_space(Rc::clone(&ram));
+        assert_eq!(
+            image.load(4, &Address::new(ram, 0x401000)).unwrap(),
+            [0x07, 0x20, 0x70, 0x47]
+        );
+    }
+
+    #[test]
+    fn default_target_preserves_detected_language_and_fallback() {
+        let elf = build_elf64(0x1000, &[0xb8, 0x07, 0x00, 0xc3], None);
+        let pe = std::fs::read(format!(
+            "{}/tests/fixtures/armv4t_thumb_pe.exe",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        for bytes in [&elf, &pe] {
+            let automatic = ObjectLoadImage::from_bytes("synthetic", bytes).unwrap();
+            for target in ["", "default", " default ", " \t"] {
+                for load in [
+                    ObjectLoadImage::from_bytes_with_target,
+                    ObjectLoadImage::from_bytes_silent_with_target,
+                ] {
+                    let image = load("synthetic", bytes, target).unwrap();
+                    assert_eq!(image.arch_id(), automatic.arch_id());
+                    assert_eq!(image.fallback_arch_id(), automatic.fallback_arch_id());
+                    assert_eq!(image.section_snapshot(), automatic.section_snapshot());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_decoder_width_preserves_elf_container_mapping() {
+        let code = [0xb8, 0x07, 0x00, 0xc3];
+        let bytes = build_elf64(0x1000, &code, None);
+        let automatic = ObjectLoadImage::from_bytes("synthetic", &bytes).unwrap();
+        for target in ["x86:LE:16:Real Mode:default", "x86:LE:32:default:gcc"] {
+            let mut image =
+                ObjectLoadImage::from_bytes_with_target("synthetic", &bytes, target).unwrap();
+            assert_eq!(image.arch_id(), target.as_bytes());
+            assert_eq!(image.section_snapshot(), automatic.section_snapshot());
+            let ram = Rc::clone(manager().get_default_code_space().unwrap());
+            image.attach_to_space(Rc::clone(&ram));
+            assert_eq!(
+                image
+                    .load(code.len() as i32, &Address::new(ram, 0x1000))
+                    .unwrap(),
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_target_keeps_pe_mapping_across_an_endian_conflict() {
+        let path = format!(
+            "{}/tests/fixtures/armv4t_thumb_pe.exe",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("read synthetic ARM PE fixture");
+        let automatic = ObjectLoadImage::from_bytes(&path, &bytes).unwrap();
+        let mut image =
+            ObjectLoadImage::from_bytes_with_target(&path, &bytes, "ARM:BE:32:v4t:default")
+                .expect("an endian-conflicting target is reported, not refused");
+        assert_eq!(image.get_arch_type(), b"ARM:BE:32:v4t:default");
+        assert_eq!(image.section_snapshot(), automatic.section_snapshot());
+        let ram = Rc::clone(manager().get_default_code_space().unwrap());
+        image.attach_to_space(Rc::clone(&ram));
+        assert_eq!(
+            image.load(4, &Address::new(ram, 0x401000)).unwrap(),
+            [0x07, 0x20, 0x70, 0x47]
+        );
+    }
+
+    #[test]
+    fn target_endian_note_fires_only_on_a_real_conflict() {
+        let path = format!(
+            "{}/tests/fixtures/armv4t_thumb_pe.exe",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("read synthetic ARM PE fixture");
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        assert!(target_endian_note(&file, "ARM:BE:32:v4t:default")
+            .is_some_and(|note| note.contains("BE-endian") && note.contains("LE-endian")));
+        assert!(target_endian_note(&file, "ARM:LE:32:v4t:default").is_none());
+        assert!(target_endian_note(&file, "ARM").is_none());
+    }
+
+    #[test]
+    fn thumb_coff_typed_parser_preserves_machine_and_mapping() {
+        use object::{BinaryFormat, Endianness, SectionKind};
+        let mut obj = object::write::Object::new(BinaryFormat::Coff, Architecture::Arm, Endianness::Little);
+        let text = obj.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        obj.append_section_data(text, &[0x07, 0x20, 0x70, 0x47], 4);
+        let mut bytes = obj.write().unwrap();
+        bytes[..2].copy_from_slice(&IMAGE_FILE_MACHINE_THUMB.to_le_bytes());
+        let file = parse_object(&bytes).unwrap();
+        assert_eq!(file.format(), BinaryFormat::Coff);
+        assert_eq!(container_machine(&file, &bytes), Some(IMAGE_FILE_MACHINE_THUMB));
+        assert_eq!(effective_architecture(&file, &bytes), Architecture::Arm);
+        assert_eq!(arm_isa_hint(&file, &bytes), Some(true));
+        let mut image = ObjectLoadImage::from_bytes("thumb.obj", &bytes).unwrap();
+        assert!(image.get_arch_type().starts_with(b"ARM:LE:32:"));
+        let start = image.section_snapshot().iter().find(|(_, _, flags)| flags & section_flags::CODE != 0).unwrap().0;
+        let m = manager();
+        let ram = Rc::clone(m.get_space_by_name("ram").unwrap());
+        image.attach_to_space(Rc::clone(&ram));
+        assert_eq!(image.load(4, &Address::new(ram, start)).unwrap(), [0x07, 0x20, 0x70, 0x47]);
+    }
+
+    #[test]
+    fn thumb_coff_typed_parser_rejects_truncated_headers_and_sections() {
+        assert!(parse_object(&[0xc2, 0x01]).is_err());
+        let mut header = [0u8; 20];
+        header[..2].copy_from_slice(&IMAGE_FILE_MACHINE_THUMB.to_le_bytes());
+        header[2..4].copy_from_slice(&1u16.to_le_bytes());
+        assert!(parse_object(&header).is_err());
+        assert!(parse_object(b"unrecognized object").is_err());
     }
 
     // ---- Real-ELF PLT/GOT import-name resolution (elf_plt) -----------------
