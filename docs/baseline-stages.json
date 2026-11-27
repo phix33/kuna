@@ -1,7 +1,7 @@
 {
   "data_footer": [
-    5603,
-    5603
+    5610,
+    5610
   ],
   "passing": [
     "data:64-bit logical shift retains unsigned destination",
@@ -1345,6 +1345,13 @@
     "data:GOT slot imports #7: no flow runs past exit into the next function or unmapped memory",
     "data:GOT slot imports #8: control: drop's tail call through the .plt.got stub keeps its argument",
     "data:GOT slot imports #9: control: len2's tail call through the stub keeps its argument",
+    "data:GOT slot no-return #1: die, whose exit goes through the GOT slot, is no-return to its caller, as through the PLT",
+    "data:GOT slot no-return #2: die2, which calls exit through the slot on both paths, is no-return, as through the PLT",
+    "data:GOT slot no-return #3: the exported vanish, reached through its own GOT slot, is no-return",
+    "data:GOT slot no-return #4: no caller runs on past a no-return wrapper into the next function",
+    "data:GOT slot no-return #5: g's error(1, ...) through the slot ends its path, as through the PLT",
+    "data:GOT slot no-return #6: control: maybe, which exits on one path only, stays returning in both images",
+    "data:GOT slot no-return #7: control: drop, a tail jump to free through its slot, stays returning in both images",
     "data:GOTIMPORTPROTO: the declared import receives the passed argument",
     "data:GOTIMPORTPROTO: the import call never keeps only the arguments its trials recover",
     "data:GOTTAILCALL #1: the jump through ext's slot is never lost to halt_missing",

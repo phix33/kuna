@@ -1,0 +1,80 @@
+<decompilertest>
+<binaryimage arch="x86:LE:64:default:gcc">
+<!--
+    The XML wrapper only provides the harness architecture. The script loads
+    GCC 15.2 x86-64 shared objects built from one source,
+    tests/fixtures/got-slot-noreturn/wrap.c (recipe there).
+    wrap_noplt_x86_64.so is built -fno-plt, so every call to an import reads
+    its target from the import's GOT slot (call *exit@GOTPCREL(%rip));
+    wrap_plt_x86_64.so calls through the PLT and is the control.
+
+    The listing's no-return propagation concludes a wrapper no-return when its
+    paths end in calls to no-return callees. It matched a call's static
+    target, and a call through a GOT slot has none, so die (exit(1)), die2
+    (exit on both paths) and the exported vanish were not concluded, and
+    their callers ran on into the next function. The error(nonzero, ...)
+    recognizer likewise knew only error's PLT stub, so g kept the code after
+    error(1, ...). The propagation now reads the slot from the indirect call's
+    operand and treats the slot of a Known no-return import, and error's
+    slot, as it treats the stub.
+
+    Controls: maybe exits on one path only and drop tail-jumps to free through
+    its slot, so both stay returning, and the PLT image prints what it printed
+    before. A strict fix with one pass.
+-->
+<bytechunk space="ram" offset="0x100000" readonly="true">c3</bytechunk>
+<symbol space="ram" offset="0x100000" name="harness_stub"/>
+</binaryimage>
+<script>
+  <com>clear architecture</com>
+  <com>load file tests/fixtures/got-slot-noreturn/wrap_noplt_x86_64.so</com>
+  <com>option listing on</com>
+  <com>read symbols</com>
+  <com>lo fu f</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu f2</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu g</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu k</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu m</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu u</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>clear architecture</com>
+  <com>load file tests/fixtures/got-slot-noreturn/wrap_plt_x86_64.so</com>
+  <com>option listing on</com>
+  <com>read symbols</com>
+  <com>lo fu f</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu f2</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu g</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu m</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu u</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>quit</com>
+</script>
+<stringmatch name="GOT slot no-return #1: die, whose exit goes through the GOT slot, is no-return to its caller, as through the PLT" min="2" max="2">die\(\); // no-return</stringmatch>
+<stringmatch name="GOT slot no-return #2: die2, which calls exit through the slot on both paths, is no-return, as through the PLT" min="2" max="2">die2\(a0\); // no-return</stringmatch>
+<stringmatch name="GOT slot no-return #3: the exported vanish, reached through its own GOT slot, is no-return" min="1" max="1">vanish\(\); // no-return</stringmatch>
+<stringmatch name="GOT slot no-return #4: no caller runs on past a no-return wrapper into the next function" min="0" max="0">funcboundflow</stringmatch>
+<stringmatch name="GOT slot no-return #5: g's error(1, ...) through the slot ends its path, as through the PLT" min="2" max="2">error\(1,0,"bad %d"
+return v1;</stringmatch>
+<stringmatch name="GOT slot no-return #6: control: maybe, which exits on one path only, stays returning in both images" min="2" max="2">^ *maybe\([^)]*\);$</stringmatch>
+<stringmatch name="GOT slot no-return #7: control: drop, a tail jump to free through its slot, stays returning in both images" min="2" max="2">^ *drop\([^)]*\);$</stringmatch>
+</decompilertest>

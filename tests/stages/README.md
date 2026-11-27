@@ -197,6 +197,18 @@ importdata off`: there no symbol sits at a slot, so its facts park nowhere. A
 strict fix with one pass. The fixtures and their recipe are in
 `tests/fixtures/got-slot-imports/`.
 
+`kuna-gotslotnoreturn.xml` loads two GCC x86-64 builds of one source, with
+`-fno-plt` and with the PLT, and turns on the listing so that no-return
+propagation runs. Through GOT slots:
+- `die` (`exit(1)`), `die2` (`exit` on both paths) and the exported `vanish`
+  are no-return to their callers;
+- `g`'s `error(1, …)` ends its path.
+
+Main left all of them returning, so callers ran on into the next function.
+The PLT build and two returning wrappers stay as they were: `maybe`, which
+exits on one path only, and `drop`, a tail jump to `free`. A strict fix with
+one pass. The fixtures and their recipe are in `tests/fixtures/got-slot-noreturn/`.
+
 `kuna-ppc64-plt-stubs.xml` checks PowerPC64 ELFv2 shared objects whose
 wrappers call `free` and `strlen` through each linker stub form: GNU ld's
 TOC stub with and without the `r2` save, its pc-relative stub for Power10

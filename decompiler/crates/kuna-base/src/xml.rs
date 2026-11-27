@@ -2344,7 +2344,8 @@ mod tests {
         // and kuna-homespill-win64 / a Windows x64 argument register spilled to its home slot is a parameter
         // and gh1883-quotientreturn-x64 / a div quotient beside a float computed from its remainder is no return
         // and kuna-gotslotimports / a call through an import's GOT slot takes the import's prototype and no-return
-        assert_eq!(count, 942, "corpus file count drifted");
+        // and kuna-gotslotnoreturn / a wrapper of a no-return import called through its GOT slot is no-return
+        assert_eq!(count, 943, "corpus file count drifted");
     }
 
     /// ~20 representative SLEIGH spec files across varied processors

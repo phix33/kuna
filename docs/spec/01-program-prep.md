@@ -11826,6 +11826,25 @@ Known no-return stub (`exit`, `abort`, `__stack_chk_fail`) no-return, then the
 stub in front of that one, and so on. Ordinary imports such as `memcpy`,
 `fopen64` and `pthread_once` then truncated every caller at the call.
 
+A call or tail jump through an import's `GLOB_DAT` GOT slot (`call
+*exit@GOTPCREL(%rip)` in a `-fno-plt` build) has no static target in the
+Listing. Both rules therefore read the slot from the instruction's operand
+(`slot_operand`): an indirect CALL or JMP whose operand is exactly one absolute
+memory word, `qword ptr [0x3fd8]` or `dword ptr [0x…]`, names that slot. The
+terminal set also holds every ELF code-import slot
+(`kuna_elfgotimports::function_slots`) that a no-return seed names. The Known
+pass emits the slot's fact beside the stub's (see the known names), and
+`Listing::with_noreturn_seeds` keeps a seed that names no discovered function
+in `noreturn_slots` instead of dropping it. Both rules accept a transfer through
+such a slot as they accept one to a terminal entry. That includes the strict
+rule's tail JMP, which would otherwise be a refused computed jump. The `error`
+recognizer takes the `error`/`error_at_line` slots the same way. Before this, a
+`-fno-plt` wrapper of `exit` was never concluded no-return, so its callers ran on
+into the next function, and `error(1, …)` through the slot kept its
+fall-through. A register-relative operand (an i386 PIC `[EAX + -0x4]`) names no
+address and stays unresolved. A seed that is not an ELF GOT slot (a PE IAT
+entry) is not used.
+
 The deferred analysis commit also seeds the Listing from function symbols already
 marked no-return, including `option noreturn <name>` applied before `read symbols`.
 These explicit facts must reach propagation before caller flow is constructed;

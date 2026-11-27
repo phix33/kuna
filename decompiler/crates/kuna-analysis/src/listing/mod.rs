@@ -175,6 +175,9 @@ pub struct Listing {
     /// The MIPS lazy-binding stub transfers the loader proved, `(site, end)`;
     /// kept so a resumed walk ends them as the first walk did.
     mips_transfers: Vec<(u64, u64)>,
+    /// The no-return seeds that name no discovered function: an import's GOT
+    /// slot, which a memory-indirect call reads its target from.
+    noreturn_slots: BTreeSet<u64>,
 }
 
 impl Listing {
@@ -244,6 +247,7 @@ impl Listing {
             a32_extents: Vec::new(),
             x86_switch_rebuild: false,
             mips_transfers: Vec::new(),
+            noreturn_slots: BTreeSet::new(),
         }
     }
 
@@ -450,6 +454,7 @@ impl Listing {
                     a32_extents: Vec::new(),
                     x86_switch_rebuild: false,
                     mips_transfers: Vec::new(),
+                    noreturn_slots: BTreeSet::new(),
                 };
             }
         };
@@ -548,6 +553,7 @@ impl Listing {
             a32_extents: painter.a32_extents().to_vec(),
             x86_switch_rebuild: x86_tables.is_some(),
             mips_transfers,
+            noreturn_slots: BTreeSet::new(),
         }
     }
 
@@ -624,6 +630,7 @@ impl Listing {
             a32_extents: Vec::new(),
             x86_switch_rebuild: false,
             mips_transfers: Vec::new(),
+            noreturn_slots: BTreeSet::new(),
         }
     }
 
@@ -645,6 +652,7 @@ impl Listing {
             a32_extents: Vec::new(),
             x86_switch_rebuild: false,
             mips_transfers: Vec::new(),
+            noreturn_slots: BTreeSet::new(),
         }
     }
 
@@ -667,6 +675,7 @@ impl Listing {
             a32_extents: Vec::new(),
             x86_switch_rebuild: false,
             mips_transfers: Vec::new(),
+            noreturn_slots: BTreeSet::new(),
         }
     }
 
@@ -677,13 +686,17 @@ impl Listing {
     ///
     /// Consumes and returns `self` (a builder-style post-build refinement): the
     /// keystone walk does not know the Known/fixup facts (they come from sibling
-    /// passes), so they are layered on after `build`. A seed VMA with no matching
-    /// `DiscoveredFunction` is ignored (additive, never fails).
+    /// passes), so they are layered on after `build`. A no-return seed VMA with
+    /// no matching `DiscoveredFunction` is kept in [`Self::noreturn_slots`] (an
+    /// import's GOT slot carries one); a call-fixup seed without one is ignored.
     #[must_use]
     pub fn with_noreturn_seeds(mut self, noreturn: &[u64], callfixup: &[u64]) -> Listing {
         for &addr in noreturn {
-            if let Some(f) = self.funcs.get_mut(&addr) {
-                f.has_no_return = true;
+            match self.funcs.get_mut(&addr) {
+                Some(f) => f.has_no_return = true,
+                None => {
+                    self.noreturn_slots.insert(addr);
+                }
             }
         }
         for &addr in callfixup {
@@ -695,6 +708,12 @@ impl Listing {
             }
         }
         self
+    }
+
+    /// The no-return seeds that name no discovered function (see
+    /// [`Self::with_noreturn_seeds`]).
+    pub fn noreturn_slots(&self) -> &BTreeSet<u64> {
+        &self.noreturn_slots
     }
 
     // ---- instruction model ----
@@ -1005,6 +1024,7 @@ mod tests {
             a32_extents: Vec::new(),
             x86_switch_rebuild: false,
             mips_transfers: Vec::new(),
+            noreturn_slots: BTreeSet::new(),
         };
         let addrs = |start, end| {
             listing
@@ -1075,5 +1095,15 @@ mod tests {
                 assert_eq!(resumed.refs, fresh.refs);
             }
         }
+    }
+
+    #[test]
+    fn a_noreturn_seed_with_no_function_is_kept_as_a_slot() {
+        use crate::listing::model::DiscoveredFunction;
+        let func = DiscoveredFunction { entry: 0x10, name: None, from_symbol: true, has_no_return: false, call_fixup: None };
+        let listing = Listing::from_model_for_test(Vec::new(), vec![func], Vec::new(), vec![(0, 0x100)])
+            .with_noreturn_seeds(&[0x10, 0x3fd8], &[0x3fe0]);
+        assert!(listing.function_at(0x10).is_some_and(|f| f.has_no_return));
+        assert_eq!(listing.noreturn_slots().iter().copied().collect::<Vec<_>>(), vec![0x3fd8]);
     }
 }
