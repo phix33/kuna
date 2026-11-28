@@ -1469,32 +1469,15 @@ pub fn apply_cli_default_options(prog: &mut ConsoleProgram, size_bytes: u64) {
 /// Decompile `name`@`addr` through the in-process CLI path — the SAME shared
 /// per-function step the whole-binary surfaces run (`decompile_step::
 /// decompile_one`, DIV-66), seeded exactly as `kuna_console::project` seeds it:
-/// the DWARF stack-local re-seed plus the analysis's `call error(nonzero,…)`
-/// CALL_RETURN flow prunes (project.rs builds the same list from
-/// `arch.error_noreturn_callsites`; empty unless Listing + `noreturn_error`
-/// found such sites).  Then `print_c`.  This is the differential ground truth.
+/// the DWARF stack locals and the flow facts on the architecture.
 pub fn decompile_cli(prog: &mut ConsoleProgram, name: &str, addr: &Address) -> String {
     let mapped = prog.dwarf_locals_for(addr.get_offset());
-    let flow_ovr: Vec<(Address, u32)> = match addr.get_space() {
-        Some(space) if !prog.arch().error_noreturn_callsites.is_empty() => prog
-            .arch()
-            .error_noreturn_callsites
-            .iter()
-            .map(|&off| {
-                (
-                    Address::new(Rc::clone(space), off),
-                    kuna_decomp::overrides::flow_type::CALL_RETURN,
-                )
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
     let fd = kuna_console::decompile_step::decompile_one(
         prog.arch_mut(),
         name,
         addr.clone(),
         0,
-        &kuna_console::decompile_step::DecompileSeed::plain(&mapped, &flow_ovr),
+        &kuna_console::decompile_step::DecompileSeed::plain(&mapped, &[]),
         &[],
     )
     .result

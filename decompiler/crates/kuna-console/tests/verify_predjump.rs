@@ -130,12 +130,13 @@ fn decompile_bail_caller(options: &[(&str, &str)]) -> String {
     status.optr.clone()
 }
 
-/// No-return propagation follows the skip of `bail`'s `bxne r0` to its
-/// `bl abort`, so `bail` is no-return and `bail_caller` drops its `return`.
-/// `noreturn_disc` is off so that propagation alone decides.
+/// A non-null callback tail-called by `bxne r0` can return to the caller.
+/// Only the null callback reaches `bl abort`.
 #[test]
-fn a_function_leaving_through_a_predicated_jump_and_abort_stays_no_return() {
-    let c = decompile_bail_caller(&[("listing", "on"), ("noreturn_disc", "off")]);
-    assert!(c.contains("bail") && c.contains("// no-return"), "{c}");
-    assert!(!c.contains("* 7"), "{c}");
+fn a_caller_keeps_its_return_after_a_predicated_callback_tail_call() {
+    for reach in ["off", "on"] {
+        let c = decompile_bail_caller(&[("listing", "on"), ("noreturn_disc", "off"), ("noreturn_reach", reach)]);
+        assert!(c.contains("bail(a0);") && !c.contains("// no-return"), "{c}");
+        assert!(c.contains("return a1 * 7 + 3;"), "{c}");
+    }
 }

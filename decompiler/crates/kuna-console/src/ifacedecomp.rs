@@ -1300,7 +1300,7 @@ decomp_command!(
         // The kuna path resolves the entry from the binaryimage's own symbol
         // records (the readLoaderSymbols hook), where C++ uses
         // resolveScopeFromSymbolName + queryFunction + followFlow.
-        let mut flow_overrides =
+        let flow_overrides =
             dcp.pending_flow_overrides.get(&funcname).cloned().unwrap_or_default();
         let prog = dcp.conf.as_mut().expect("conf checked non-None above");
         // (kuna) Safety commit: if a session loads a function without an explicit
@@ -1329,21 +1329,6 @@ decomp_command!(
         } else {
             selected.name
         };
-        // (kuna, Ghidra-gap) Apply the analysis's `call error(nonzero,…)` no-return facts
-        // as CALL_RETURN flow overrides — the SAME prune `decompile-all` does — so the
-        // single-function console decompile does NOT overrun past a no-returning
-        // `call error` into the following function. `error_noreturn_callsites` is empty
-        // unless the Listing + `noreturn_error` are on (so a listing-less session is
-        // unchanged). The whole binary's list is passed; only sites this function's flow
-        // visits are applied.
-        if let Some(space) = entry.get_space() {
-            for &off in &prog.arch().error_noreturn_callsites {
-                flow_overrides.push((
-                    kuna_base::address::Address::new(std::rc::Rc::clone(space), off),
-                    kuna_decomp::overrides::flow_type::CALL_RETURN,
-                ));
-            }
-        }
         // Build the Funcdata + follow flow (C++ Funcdata + followFlow), seeding any
         // `override flow` facts stashed for this function before flow follows.
         // A `function bounds` declaration for this entry bounds the follow;
@@ -1430,20 +1415,6 @@ decomp_command!(
                 .function_display_name_across_scopes(&offset)
                 .unwrap_or_else(|| prog.arch().name_function(&offset))
         };
-        // (kuna, Ghidra-gap) error(nonzero) no-return prune, mirroring decompile-all and
-        // IfcFuncload: apply the analysis's `call error(nonzero,…)` facts as CALL_RETURN
-        // flow overrides so `load addr` does NOT overrun past a no-returning `call error`
-        // into the next function. Empty unless the Listing + noreturn_error are on.
-        let mut flow_overrides: Vec<(kuna_base::address::Address, kuna_base::types::uint4)> =
-            Vec::new();
-        if let Some(space) = offset.get_space() {
-            for &off in &prog.arch().error_noreturn_callsites {
-                flow_overrides.push((
-                    kuna_base::address::Address::new(std::rc::Rc::clone(space), off),
-                    kuna_decomp::overrides::flow_type::CALL_RETURN,
-                ));
-            }
-        }
         // The symbol-table addFunction is a later boundary; build the Funcdata
         // + follow flow directly (C++ addFunction + followFlow).
         // `load addr [ram,<start>,<size>]` states the extent inline (C++
@@ -1462,7 +1433,7 @@ decomp_command!(
         let entry_stamp = offset.clone();
         let name_stamp = name.clone();
         let fd =
-            build_and_follow_flow_within_budget(prog.arch_mut(), &name, offset, declared, &flow_overrides)
+            build_and_follow_flow_within_budget(prog.arch_mut(), &name, offset, declared, &[])
                 .map_err(|e| IfaceError::execution(e.explain().to_string()))?;
         // (kuna) Same follow stamp as `load function` (see `PristineFlow`).
         dcp.stopped_flow = None;
@@ -1471,7 +1442,7 @@ decomp_command!(
             name: name_stamp,
             entry: entry_stamp,
             size: declared,
-            flow_overrides,
+            flow_overrides: Vec::new(),
         });
         dcp.select_loaded_function(fd);
         dcp.pending_local_checks.clear();
@@ -2249,25 +2220,11 @@ decomp_command!(
         }
         // The `override flow` facts stashed for this function (re-seeded on the
         // rebuilt IR, like `pending_proto`/`mapped_symbols`).
-        let mut flow_overrides = dcp_mut(status)?
+        let flow_overrides = dcp_mut(status)?
             .pending_flow_overrides
             .get(&name)
             .cloned()
             .unwrap_or_default();
-        // (kuna, Ghidra-gap) Apply the analysis's `call error(nonzero,…)` no-return facts
-        // as CALL_RETURN flow overrides on the rebuilt IR — the SAME prune `decompile-all`
-        // does — so the single-function console decompile does NOT overrun a no-returning
-        // `call error` into the following function. `error_noreturn_callsites` is empty
-        // unless the Listing + noreturn_error are on, so a listing-less session (datatest
-        // path) is byte-identical. Only sites this function's flow visits are applied.
-        if let Some(space) = entry.get_space() {
-            for &off in &prog.arch().error_noreturn_callsites {
-                flow_overrides.push((
-                    kuna_base::address::Address::new(std::rc::Rc::clone(space), off),
-                    kuna_decomp::overrides::flow_type::CALL_RETURN,
-                ));
-            }
-        }
         // The `map param <i> <addr> <decl>` storage locks stashed for this
         // function (re-seeded on the rebuilt IR, like `pending_proto`).
         let mapped_params = {

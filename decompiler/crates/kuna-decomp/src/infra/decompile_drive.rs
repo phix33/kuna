@@ -193,6 +193,9 @@ impl FlowEnvironment for ArchFlowEnv {
     fn query_call_no_return(&self, entry: &Address) -> bool {
         crate::p4_calls::kuna_calleenoreturn::is_no_return(self.arch(), entry)
     }
+    fn terminal_call_site(&self, site: &Address) -> bool {
+        self.arch().error_noreturn_callsites.binary_search(&site.get_offset()).is_ok()
+    }
     fn query_call_no_return_at(&self, entry: &Address, call: &Address, fallthrough: &Address) -> bool {
         crate::p4_calls::kuna_calleenoreturn::is_proxy_no_return_at(self.arch(), entry, call, fallthrough)
     }

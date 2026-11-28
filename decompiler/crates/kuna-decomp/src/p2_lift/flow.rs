@@ -603,6 +603,11 @@ pub trait FlowEnvironment {
         false
     }
 
+    /// Does analysis prove this particular call has no fall-through?
+    fn terminal_call_site(&self, _site: &Address) -> bool {
+        false
+    }
+
     /// (kuna `noreturn_known`) Is this one direct call to `entry`, the instruction
     /// at `call` falling through to `fallthrough`, no-return although the callee
     /// is not? See
@@ -3267,6 +3272,15 @@ truncating the fall-through here"
     /// (invalid for an indirect call); the inline/noreturn flow effects were
     /// already copied onto the fspec by [`build_call_specs`].
     fn check_for_flow_modification(&mut self, op: OpId, entry: &Address) -> KunaResult<bool> {
+        if let Some(site) = self.data.obank().get(op).map(|o| o.get_addr()) {
+            if self.env.terminal_call_site(site)
+                && self.data.get_override().get_flow_override(site) == crate::overrides::flow_type::NONE
+            {
+                if let Some(idx) = self.data.get_call_specs_index(op) {
+                    self.data.get_call_specs_mut(idx).proto_mut().set_no_return(true);
+                }
+            }
+        }
         // The flow effects live on the just-built fspec; recover its flags.
         let (is_inline, is_no_return) = match self.data.get_call_specs_index(op) {
             Some(idx) => {

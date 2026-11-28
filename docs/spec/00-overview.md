@@ -3138,11 +3138,9 @@ decides. The directive seeds that store: `assertions::seed_one` resolves the
 address in the default code space, maps the caller's word through
 `Override::string_to_type` (rejecting anything outside `branch`, `call`,
 `callreturn`, `return` with a reason rather than dropping it), and parks the pair
-in `FunctionSeed::flow_overrides`, which
-`decompiler/crates/kuna-console/src/project.rs (decompile_targets)` appends to the
-derived overrides it already carries — the analysis's `call error(nonzero,…)`
-no-return prunes — so a caller-stated fact wins the map insert at an address both
-name. The script surface reaches the same store through the ported console
+in `FunctionSeed::flow_overrides` for the per-function drive. A caller-stated
+flow override takes precedence over an inferred no-return status at the same
+call. The script surface reaches the same store through the ported console
 command (`kuna-console/src/ifacedecomp.rs (IfcFlowOverride)`), whose facts the
 console re-seeds on every IR rebuild; the two surfaces render the same C. Because
 the override is read at flow time, a type the engine cannot honour at that

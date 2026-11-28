@@ -89,7 +89,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::listing::model::Insn;
+use kuna_decomp::kuna_x86gotslot::slot_operand;
+use object::Object;
+
+use crate::listing::model::{Insn, RefKind};
 use crate::listing::Listing;
 use crate::loader::format::{ImportSym, ImportSymKind};
 use crate::pass::{AnalysisCtx, AnalysisOutput, AnalysisPass, NoReturnFact, Phase};
@@ -128,9 +131,13 @@ impl AnalysisPass for NoReturnPropagatePass {
         // `error`/`error_at_line` entry addresses (PLT stubs, GOT slots + any defined funcsym)
         // so the propagation rule can treat a `call error(nonzero)` tail as terminal.
         let imports = crate::loader::format::resolve_imports(ctx.file, ctx.bytes);
-        let slots = crate::loader::kuna_elfgotimports::function_slots(ctx.file);
-        let error_recog = if ctx.arch.analysis_noreturn_known {
-            ErrorRecognizer::from_imports(&imports, &slots, listing)
+        let sysv64 = ctx.file.architecture() == object::Architecture::X86_64
+            && ctx.file.format() == object::BinaryFormat::Elf
+            && ctx.arch.archid == "x86:LE:64:default:gcc";
+        let check_status = sysv64 && ctx.arch.analysis_noreturn_known;
+        let (terminal_sites, error_sites) = import_transfer_sites(ctx, listing, check_status);
+        let error_recog = if check_status {
+            ErrorRecognizer::from_imports(&imports, error_sites, listing)
         } else {
             ErrorRecognizer::disabled()
         };
@@ -142,13 +149,11 @@ impl AnalysisPass for NoReturnPropagatePass {
         // so every parity gate stays byte-identical.
         let reach = ctx.arch.analysis_noreturn_reach;
         let resuming_entry = crate::pclntab::kuna_gomcall::resuming_entry(ctx, listing);
-        let terminal_slots: BTreeSet<u64> =
-            slots.iter().map(|&(slot, _)| slot).filter(|slot| listing.noreturn_slots().contains(slot)).collect();
-        for fact in propagate_noreturn(listing, &error_recog, reach, &stubs, resuming_entry, &terminal_slots) {
+        for fact in propagate_noreturn(listing, &error_recog, reach, &stubs, resuming_entry, &terminal_sites) {
             out.noreturn.push(fact);
         }
         // (kuna, Ghidra-gap) Emit every `call error(nonzero,…)` site so the decompile
-        // seam prunes its fall-through (CALL_RETURN override). The recognizer is
+        // flow follower ends this call with a no-return halt. The recognizer is
         // `disabled()` (no addresses) under `noreturn_known off`, so this yields an
         // empty set then.
         out.no_fallthru_calls = collect_error_noreturn_callsites(listing, &error_recog);
@@ -179,7 +184,7 @@ fn collect_error_noreturn_callsites(
             // `call_is_terminal_error` = is_call && target is error && arg0 nonzero const
             // (its name is "terminal" because such a call never returns; it is valid at
             // any body position, not only the last).
-            if error_recog.call_is_terminal_error(&body, vma, insn, false) {
+            if error_recog.call_is_terminal_error(&body, vma, insn) {
                 sites.push(vma);
             }
         }
@@ -209,7 +214,7 @@ struct ErrorRecognizer {
     /// Empty ⇒ the recognizer is inert (disabled, or no `error` import present).
     error_addrs: BTreeSet<u64>,
     /// The indirect calls that read an `error`/`error_at_line` GOT slot
-    /// ([`slot_sites`]).
+    /// ([`import_transfer_sites`]).
     error_slot_sites: BTreeSet<u64>,
     /// (kuna #1288) The MS-DOS exit interrupts ([`crate::listing::kuna_dosexit`]):
     /// call sites that never return whatever their arguments.
@@ -218,6 +223,7 @@ struct ErrorRecognizer {
 
 trait InstructionBody {
     fn instruction_at(&self, vma: u64) -> Option<&Insn>;
+    fn single_predecessor(&self, vma: u64, from: u64) -> bool;
     fn instruction_before(&self, vma: u64) -> Option<(u64, &Insn)>;
 }
 
@@ -242,6 +248,11 @@ impl<'a> ListingInstructionBody<'a> {
 }
 
 impl<'a> InstructionBody for ListingInstructionBody<'a> {
+    fn single_predecessor(&self, vma: u64, from: u64) -> bool {
+        self.listing.has_refs() && self.listing.refs_to(vma).iter().all(|r|
+            !matches!(r.kind, RefKind::Code | RefKind::Call) || r.from == from)
+    }
+
     fn instruction_at(&self, vma: u64) -> Option<&Insn> {
         if self.contains(vma) {
             self.listing.instruction_at(vma)
@@ -261,6 +272,10 @@ impl<'a> InstructionBody for ListingInstructionBody<'a> {
 
 #[cfg(test)]
 impl<'a> InstructionBody for BTreeMap<u64, &'a Insn> {
+    fn single_predecessor(&self, vma: u64, from: u64) -> bool {
+        self.iter().all(|(&addr, i)| addr == from || !i.flows.contains(&vma))
+    }
+
     fn instruction_at(&self, vma: u64) -> Option<&Insn> {
         self.get(&vma).copied()
     }
@@ -288,21 +303,15 @@ impl ErrorRecognizer {
     /// no-return pass scans), the imports' GOT `slots` a `-fno-plt` call reads,
     /// plus any defined/named funcsym the Listing carries (the unstripped-static
     /// case). Version-suffix stripped like the Known pass.
-    fn from_imports(imports: &[ImportSym], slots: &[(u64, Vec<u8>)], listing: &Listing) -> Self {
+    fn from_imports(imports: &[ImportSym], error_slot_sites: BTreeSet<u64>, listing: &Listing) -> Self {
         let mut error_addrs = BTreeSet::new();
         let is_error_name = |n: &str| n == "error" || n == "error_at_line";
-        let error_slots: BTreeSet<u64> = slots
-            .iter()
-            .filter(|(_, name)| std::str::from_utf8(name).is_ok_and(|n| is_error_name(n.trim_start_matches('_'))))
-            .map(|&(slot, _)| slot)
-            .collect();
-        let error_slot_sites = slot_sites(listing, &error_slots);
         // Dynamic imports (PLT stubs): the common dynamically-linked case.
         for p in imports {
             if let Ok(n) =
                 String::from_utf8(crate::loader::elf_plt::strip_version(&p.name))
             {
-                if is_error_name(n.trim_start_matches('_')) {
+                if is_error_name(&n) {
                     error_addrs.insert(p.addr);
                 }
             }
@@ -310,7 +319,7 @@ impl ErrorRecognizer {
         // Named functions in the Listing (a defined/statically-linked `error`).
         for (&entry, f) in listing.functions() {
             if let Some(n) = f.name.as_deref() {
-                if is_error_name(n.trim_start_matches('_')) {
+                if is_error_name(n) {
                     error_addrs.insert(entry);
                 }
             }
@@ -329,29 +338,24 @@ impl ErrorRecognizer {
     ///
     /// Returns true only when (a) the call target is an `error` address and (b) the
     /// last write to the first int-arg register (x86-64 SysV `EDI`/`RDI`, the `int
-    /// status`) before the call is a `MOV reg, imm` with a nonzero literal. A zero
-    /// status (`XOR EDI,EDI` / `MOV EDI,0x0` — `error` *returns*) or any non-constant /
-    /// unprovable definition is rejected (conservative: a false positive would drop
-    /// live caller code). `require_contiguous` preserves the reachability walk's
-    /// stricter predecessor rule; the strict tail and call-site scans intentionally
-    /// retain their address-order semantics.
+    /// status`) is a literal MOV in the same basic block with a nonzero low word.
     fn call_is_terminal_error<B: InstructionBody + ?Sized>(
         &self,
         body: &B,
         call_vma: u64,
         call: &Insn,
-        require_contiguous: bool,
     ) -> bool {
-        if !call.flow.is_call {
+        if !call.flow.is_call || call.flow.is_conditional {
             return false;
         }
         if self.exit_sites.contains(&call_vma) {
             return true;
         }
-        if !call.flows.iter().any(|t| self.is_error(*t)) && !self.error_slot_sites.contains(&call_vma) {
+        let direct = !call.flow.is_computed && call.flows.iter().any(|t| self.is_error(*t));
+        if !direct && !self.error_slot_sites.contains(&call_vma) {
             return false;
         }
-        arg0_is_nonzero_const_before(body, call_vma, require_contiguous)
+        arg0_is_nonzero_const_before(body, call_vma)
     }
 }
 
@@ -371,11 +375,11 @@ fn parse_imm(tok: &str) -> Option<i64> {
     let t = tok.trim();
     let (neg, t) = t.strip_prefix('-').map_or((false, t), |r| (true, r));
     let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        i64::from_str_radix(h, 16).ok()?
+        u64::from_str_radix(h, 16).ok()? as i64
     } else {
         t.parse::<i64>().ok()?
     };
-    Some(if neg { -v } else { v })
+    Some(if neg { v.wrapping_neg() } else { v })
 }
 
 /// Backward-scan the straight-line predecessors of the call at `call_vma` for the
@@ -391,11 +395,10 @@ fn parse_imm(tok: &str) -> Option<i64> {
 fn arg0_is_nonzero_const_before<B: InstructionBody + ?Sized>(
     body: &B,
     call_vma: u64,
-    require_contiguous: bool,
 ) -> bool {
     let mut vma = call_vma;
     while let Some((previous_vma, insn)) = body.instruction_before(vma) {
-        if require_contiguous && insn.fall_through != Some(vma) {
+        if insn.fall_through != Some(vma) || !body.single_predecessor(vma, previous_vma) {
             return false;
         }
         // A branch/return between here and the call breaks straight-line dominance.
@@ -415,16 +418,23 @@ fn arg0_scan_result(insn: &Insn) -> Option<bool> {
     let mut parts = ops.splitn(2, ',');
     let dest = parts.next().unwrap_or("").trim();
     let src = parts.next().unwrap_or("").trim();
+    let mnemonic = insn.mnemonic.as_str();
     if is_arg0_reg(dest) {
-        // The nearest definition of the status register: decide here.
-        // `MOV EDI, <imm>`: nonzero literal ⇒ error() never returns.
         return Some(
-            insn.mnemonic.as_str().trim().eq_ignore_ascii_case("MOV")
-                && parse_imm(src).is_some_and(|v| v != 0),
+            mnemonic.eq_ignore_ascii_case("MOV")
+                && (dest.eq_ignore_ascii_case("EDI") || dest.eq_ignore_ascii_case("RDI"))
+                && parse_imm(src).is_some_and(|v| v as u32 != 0),
         );
     }
-    // A call before the definition clobbers the caller-saved arg register.
-    insn.flow.is_call.then_some(false)
+    // None of these instructions has an implicit write to the status register.
+    // XADD, XCHG and string instructions can write RDI elsewhere.
+    let preserves = [
+        "MOV", "MOVZX", "MOVSX", "LEA", "XOR", "ADD", "SUB", "AND", "OR", "TEST", "CMP", "NOP",
+        "PUSH",
+    ]
+    .iter()
+    .any(|m| mnemonic.eq_ignore_ascii_case(m));
+    (!preserves || insn.flow.is_call).then_some(false)
 }
 
 /// Is `insn` an alignment NOP — the trailing padding a compiler emits after a
@@ -451,37 +461,74 @@ fn import_stubs(imports: &[ImportSym]) -> BTreeSet<u64> {
         .collect()
 }
 
-/// The memory word an indirect call or jump reads its target from, when the
-/// operand is that one absolute address: `qword ptr [0x3fd8]`, as an x86-64
-/// `call *f@GOTPCREL(%rip)` disassembles. A register-relative operand (an i386
-/// PIC `[EAX + -0x4]`) names no address and gives `None`.
-fn slot_operand(insn: &Insn) -> Option<u64> {
-    if !insn.flow.is_indirect {
-        return None;
+fn import_transfer_sites(
+    ctx: &AnalysisCtx,
+    listing: &Listing,
+    check_status: bool,
+) -> (BTreeSet<u64>, BTreeSet<u64>) {
+    use object::Architecture::{I386, X86_64};
+    let mut terminal = BTreeSet::new();
+    let mut errors = BTreeSet::new();
+    let long_mode = ctx.file.architecture() == X86_64 && ctx.arch.archid.starts_with("x86:LE:64:");
+    let x86 = ctx.file.architecture() == I386 && ctx.arch.archid.starts_with("x86:LE:32:");
+    if ctx.file.format() != object::BinaryFormat::Elf || !(long_mode || x86) {
+        return (terminal, errors);
     }
-    let operand = insn.operands.trim();
-    let inner = operand.strip_prefix("qword ptr [").or_else(|| operand.strip_prefix("dword ptr ["))?;
-    u64::from_str_radix(inner.strip_suffix(']')?.strip_prefix("0x")?, 16).ok()
-}
-
-/// The instructions of `listing` that read one of `slots` ([`slot_operand`]),
-/// resolved once per run. Empty, without a scan, when `slots` is.
-fn slot_sites(listing: &Listing, slots: &BTreeSet<u64>) -> BTreeSet<u64> {
+    if listing.noreturn_slots().is_empty() && !check_status {
+        return (terminal, errors);
+    }
+    let mut slots = BTreeMap::new();
+    for (slot, name) in crate::loader::kuna_elfgotimports::function_slots(ctx.file) {
+        let known = listing.noreturn_slots().contains(&slot);
+        let error = check_status && matches!(name.as_slice(), b"error" | b"error_at_line");
+        if known || error {
+            slots.insert(slot, (known, error));
+        }
+    }
     if slots.is_empty() {
-        return BTreeSet::new();
+        return (terminal, errors);
     }
-    listing
-        .instructions()
-        .filter(|(_, insn)| slot_operand(insn).is_some_and(|slot| slots.contains(&slot)))
-        .map(|(&vma, _)| vma)
-        .collect()
+    let Some(space) = ctx.arch.manage().get_default_code_space() else {
+        return (terminal, errors);
+    };
+    let fixed = ctx.file.kind() == object::ObjectKind::Executable;
+    for (&vma, insn) in listing.instructions() {
+        if !insn.flow.is_indirect
+            || insn.flow.is_conditional
+            || !(insn.flow.is_call || insn.flow.is_jump)
+            || !matches!(insn.len, 6 | 7)
+        {
+            continue;
+        }
+        let addr = kuna_base::address::Address::new(space.clone(), vma);
+        let Ok(raw) = ctx.arch.read_loadimage_value(&addr, insn.len as i32) else {
+            continue;
+        };
+        let Some(slot) = slot_operand(
+            &raw.to_le_bytes()[..insn.len as usize],
+            vma.wrapping_add(u64::from(insn.len)),
+            long_mode,
+            fixed,
+        ) else {
+            continue;
+        };
+        if let Some(&(known, error)) = slots.get(&slot) {
+            if known {
+                terminal.insert(vma);
+            }
+            if error && insn.flow.is_call {
+                errors.insert(vma);
+            }
+        }
+    }
+    (terminal, errors)
 }
 
 /// Does `insn` at `vma` call or jump to a callee in `terminal`, or read its
-/// target from a no-return import's GOT slot (`slot_sites`, [`slot_sites`])?
+/// target from a no-return import's GOT slot ([`import_transfer_sites`])?
 fn transfers_to(vma: u64, insn: &Insn, terminal: &BTreeSet<u64>, slot_sites: &BTreeSet<u64>) -> bool {
     (insn.flow.is_call || insn.flow.is_jump)
-        && (insn.flows.iter().any(|t| terminal.contains(t)) || slot_sites.contains(&vma))
+        && (slot_sites.contains(&vma) || (!insn.flow.is_computed && insn.flows.iter().any(|t| terminal.contains(t))))
 }
 
 /// Is `callee` skippable as a propagation candidate — already modeled no-return /
@@ -533,13 +580,14 @@ fn function_is_no_return(
     else {
         return false;
     };
-    let last_is_terminal_transfer = transfers_to(last_vma, last, terminal, slot_sites);
+    let last_is_terminal_transfer = !(last.flow.is_jump && last.flow.has_fallthrough)
+        && transfers_to(last_vma, last, terminal, slot_sites);
     // (kuna, decbench F2) …or a tail `call error(nonzero,…)`: glibc error()/
     // error_at_line() with a nonzero constant status calls exit() and never
     // returns, so the wrapper is no-return even though `error` itself is NOT on the
     // Known no-return list (it returns for error(0,…)). Value-conditional, checked
     // per call site by the recognizer (arg0 is a nonzero literal).
-    let last_is_terminal_error = error_recog.call_is_terminal_error(&body, last_vma, last, false);
+    let last_is_terminal_error = error_recog.call_is_terminal_error(&body, last_vma, last);
     if !last_is_terminal_transfer && !last_is_terminal_error {
         return false;
     }
@@ -557,7 +605,7 @@ fn function_is_no_return(
         }
         // Rule 3: a computed/indirect JUMP is control we cannot reason about
         // (a computed CALL is fine — calls are return-modeled).
-        if insn.flow.is_jump && insn.flow.is_computed && !transfers_to(vma, insn, terminal, slot_sites) {
+        if insn.flow.is_jump && insn.flow.is_computed && !slot_sites.contains(&vma) {
             return false;
         }
         // Rule 4: every static jump target must stay within the reachable body
@@ -676,7 +724,7 @@ fn reaches_only_noreturn_walk<B: InstructionBody + ?Sized>(
         // error(nonzero,…): use the same contiguous predecessor chain that the old
         // temporary straight-line window supplied to the argument back-scan.
         let transfers_to_error =
-            insn.flow.is_call && error_recog.call_is_terminal_error(body, vma, insn, true);
+            insn.flow.is_call && error_recog.call_is_terminal_error(body, vma, insn);
         // A CONDITIONAL jump (`ja`/`jne`/… — a jump that also FALLS THROUGH) to a
         // no-return target ends only its TAKEN arm; the fall-through (the normal,
         // non-taken path) must still be walked. This is the GCC -O2 hot/cold-split
@@ -715,7 +763,8 @@ fn reaches_only_noreturn_walk<B: InstructionBody + ?Sized>(
         if insn.flow.is_jump {
             if insn.flow.is_computed || insn.flow.is_indirect {
                 // Resolved switch: follow every case target. Unresolved ⇒ cannot prove.
-                if insn.flows.is_empty() {
+                let next = vma.wrapping_add(u64::from(insn.len));
+                if insn.flows.is_empty() || insn.flow.is_conditional || insn.flows.as_slice() == [next] {
                     return false;
                 }
                 for &t in &insn.flows {
@@ -786,7 +835,7 @@ fn propagate_noreturn(
     reach: bool,
     stubs: &BTreeSet<u64>,
     resuming_entry: Option<u64>,
-    terminal_slots: &BTreeSet<u64>,
+    slot_sites: &BTreeSet<u64>,
 ) -> Vec<NoReturnFact> {
     let mut discovered: BTreeMap<u64, NoReturnFact> = BTreeMap::new();
     // The "already no-return" anchor set: the Known-seeded functions plus
@@ -797,7 +846,7 @@ fn propagate_noreturn(
         .filter(|(_, f)| f.has_no_return)
         .map(|(&entry, _)| entry)
         .collect();
-    let slot_sites = slot_sites(listing, terminal_slots);
+
 
     let candidates: Vec<u64> = listing.functions().map(|(&entry, _)| entry).collect();
 
@@ -815,8 +864,8 @@ fn propagate_noreturn(
             }
             // The strict tail-call rule first (cheap, proven); then, if enabled, the
             // CFG-reachability generalization (Ghidra's `targetOnlyCallsNoReturn`).
-            let concluded = function_is_no_return(listing, entry, &terminal, &slot_sites, error_recog)
-                || (reach && function_reaches_only_noreturn(listing, entry, &terminal, &slot_sites, error_recog));
+            let concluded = function_is_no_return(listing, entry, &terminal, slot_sites, error_recog)
+                || (reach && function_reaches_only_noreturn(listing, entry, &terminal, slot_sites, error_recog));
             if concluded {
                 let name = listing
                     .function_at(entry)
@@ -951,8 +1000,14 @@ mod tests {
     }
 
     fn arg0_is_nonzero_const(body: &[(u64, &Insn)], call_idx: usize) -> bool {
-        let index: BTreeMap<u64, &Insn> = body.iter().copied().collect();
-        arg0_is_nonzero_const_before(&index, body[call_idx].0, false)
+        let insns: Vec<_> = body.iter().map(|(addr, i)| {
+            let mut i = (*i).clone();
+            i.addr = *addr;
+            i.fall_through = Some(*addr + 1);
+            i
+        }).collect();
+        let index: BTreeMap<u64, &Insn> = insns.iter().map(|i| (i.addr, i)).collect();
+        arg0_is_nonzero_const_before(&index, body[call_idx].0)
     }
 
     #[test]
@@ -989,6 +1044,24 @@ mod tests {
     }
 
     #[test]
+    fn status_is_the_reaching_low_word() {
+        let call = insn("CALL", "0x500", true, false);
+        let status = insn("MOV", "EDI,1", false, false);
+        let mut skip = insn("JZ", "2", false, true);
+        skip.flows.push(2);
+        assert!(!arg0_is_nonzero_const(&[(0, &skip), (1, &status), (2, &call)], 2));
+        for (mnemonic, operands) in [("XADD", "dword ptr [RAX],EDI"),
+            ("XCHG", "EAX,EDI"), ("STOSD", ""), ("MOV", "DIL,0")] {
+            let write = insn(mnemonic, operands, false, false);
+            assert!(!arg0_is_nonzero_const(&[(0, &status), (1, &write), (2, &call)], 2));
+        }
+        for (imm, nonzero) in [("0x100000000", false), ("0xffffffff80000000", true)] {
+            let write = insn("MOV", &format!("RDI,{imm}"), false, false);
+            assert_eq!(arg0_is_nonzero_const(&[(0, &write), (1, &call)], 1), nonzero);
+        }
+    }
+
+    #[test]
     fn listing_instruction_body_bounds_exact_and_predecessor_queries() {
         let mut previous_function = insn("MOV", "EDI,0x2", false, false);
         previous_function.addr = 0x80;
@@ -1022,13 +1095,13 @@ mod tests {
             exit_sites: BTreeSet::new(),
         };
         assert!(
-            !recog.call_is_terminal_error(&body, 0x100, &call, false),
+            !recog.call_is_terminal_error(&body, 0x100, &call),
             "a definition in the preceding function must not classify this call"
         );
     }
 
     #[test]
-    fn error_argument_scans_preserve_strict_and_reach_gap_rules() {
+    fn error_argument_scans_refuse_gaps_and_intervening_calls() {
         let mut definition = insn("MOV", "EDI,0x2", false, false);
         definition.addr = 0x100;
         definition.fall_through = Some(0x105);
@@ -1043,14 +1116,7 @@ mod tests {
             exit_sites: BTreeSet::new(),
         };
 
-        assert!(
-            recog.call_is_terminal_error(&body, 0x110, &call, false),
-            "the strict scan keeps its legacy address-order behavior across a gap"
-        );
-        assert!(
-            !recog.call_is_terminal_error(&body, 0x110, &call, true),
-            "the reach scan requires an exact fall-through predecessor chain"
-        );
+        assert!(!recog.call_is_terminal_error(&body, 0x110, &call));
 
         let mut definition = insn("MOV", "EDI,0x2", false, false);
         definition.addr = 0x100;
@@ -1064,7 +1130,7 @@ mod tests {
         let listing = Listing::from_insns_for_test(vec![definition, clobber, call.clone()], true);
         let body = ListingInstructionBody::new(&listing, 0x100, None);
         assert!(
-            !recog.call_is_terminal_error(&body, 0x110, &call, false),
+            !recog.call_is_terminal_error(&body, 0x110, &call),
             "an intervening call still clobbers the argument register"
         );
     }
@@ -1156,19 +1222,7 @@ mod tests {
         i.operands = operands.into();
         i
     }
-    const SLOT: u64 = 0x3fd8;
 
-    #[test]
-    fn slot_operand_reads_one_absolute_word() {
-        assert_eq!(slot_operand(&slot_insn(0x10, "qword ptr [0x3fd8]", true)), Some(SLOT));
-        assert_eq!(slot_operand(&slot_insn(0x10, "dword ptr [0x804a00c]", false)), Some(0x804a00c));
-        assert_eq!(slot_operand(&slot_insn(0x10, "dword ptr [EAX + -0x4]", true)), None);
-        assert_eq!(slot_operand(&slot_insn(0x10, "qword ptr [RAX]", true)), None);
-        assert_eq!(slot_operand(&slot_insn(0x10, "RAX", true)), None);
-        let mut direct = rinsn(0x10, Some(0x15), vec![0x50], true, false, false, false, false, true);
-        direct.operands = "qword ptr [0x3fd8]".into();
-        assert_eq!(slot_operand(&direct), None, "a direct call reads no slot");
-    }
 
     /// A function whose last real instruction calls, or tail-jumps, through a
     /// GOT slot is concluded no-return exactly when the slot is terminal.
@@ -1188,7 +1242,7 @@ mod tests {
                 let slots: BTreeSet<u64> = slots.iter().copied().collect();
                 propagate_noreturn(&listing, &recog, true, &BTreeSet::new(), None, &slots).iter().map(|f| f.addr).collect()
             };
-            assert_eq!(concluded(&[SLOT]), vec![0x10], "call={is_call}");
+            assert_eq!(concluded(&[0x15]), vec![0x10], "call={is_call}");
             assert!(concluded(&[]).is_empty(), "call={is_call}: no slot is terminal");
             assert!(concluded(&[0x3fe0]).is_empty(), "call={is_call}: another slot is terminal");
         }
@@ -1214,22 +1268,39 @@ mod tests {
         use crate::listing::model::DiscoveredFunction;
         let mut status = insn("MOV", "EDI,0x1", false, false);
         status.addr = 0x10;
+        status.fall_through = Some(0x15);
         let call = slot_insn(0x15, "qword ptr [0x3fd8]", true);
         let other = slot_insn(0x30, "qword ptr [0x3fe0]", true);
         let func = DiscoveredFunction { entry: 0x10, name: None, from_symbol: true, has_no_return: false, call_fixup: None };
         let listing = Listing::from_model_for_test(vec![status.clone(), call.clone(), other.clone()], vec![func], Vec::new(), vec![(0, 0x100)]);
-        let recog = ErrorRecognizer::from_imports(&[], &[(SLOT, b"error".to_vec())], &listing);
+        let recog = ErrorRecognizer::from_imports(&[], [0x15].into(), &listing);
         assert_eq!(recog.error_slot_sites.iter().copied().collect::<Vec<_>>(), vec![0x15]);
         assert!(recog.error_addrs.is_empty());
-        assert_eq!(collect_error_noreturn_callsites(&listing, &recog), vec![0x15], "a slot site alone is collected");
+        assert!(collect_error_noreturn_callsites(&listing, &recog).is_empty(), "missing CFG references");
         let body: BTreeMap<u64, &Insn> = [(0x10, &status), (0x15, &call)].into_iter().collect();
-        assert!(recog.call_is_terminal_error(&body, 0x15, &call, false));
+        assert!(recog.call_is_terminal_error(&body, 0x15, &call));
         let body2: BTreeMap<u64, &Insn> = [(0x10, &status), (0x30, &other)].into_iter().collect();
-        assert!(!recog.call_is_terminal_error(&body2, 0x30, &other, false));
+        assert!(!recog.call_is_terminal_error(&body2, 0x30, &other));
         let mut zero = insn("XOR", "EDI,EDI", false, false);
         zero.addr = 0x10;
         let body: BTreeMap<u64, &Insn> = [(0x10, &zero), (0x15, &call)].into_iter().collect();
-        assert!(!recog.call_is_terminal_error(&body, 0x15, &call, false), "error(0, ...) returns");
+        assert!(!recog.call_is_terminal_error(&body, 0x15, &call), "error(0, ...) returns");
+    }
+
+    #[test]
+    fn a_predicated_indirect_jump_has_an_unresolved_taken_edge() {
+        use crate::listing::model::DiscoveredFunction;
+        let entry = 0x100;
+        let skip = entry + 4;
+        let mut bx = rinsn(entry, None, vec![skip], false, true, false, true, true, false);
+        bx.len = 4;
+        let f = DiscoveredFunction { entry, name: None, from_symbol: true, has_no_return: false, call_fixup: None };
+        let listing = Listing::from_model_for_test(vec![bx], vec![f], Vec::new(), vec![(entry, skip)]);
+        let terminal = [skip].into();
+        let slots = BTreeSet::new();
+        let errors = ErrorRecognizer::disabled();
+        assert!(!function_is_no_return(&listing, entry, &terminal, &slots, &errors));
+        assert!(!function_reaches_only_noreturn(&listing, entry, &terminal, &slots, &errors));
     }
 
     #[test]

@@ -691,28 +691,6 @@ pub fn decompile_pulled(
         // catches un-ported-seam panics and returns Err, so a single bad function
         // degrades to an `error` record instead of aborting the binary.
         let mapped = prog.dwarf_locals_for(byte_address);
-        // (kuna, Ghidra-gap) `CALL_RETURN` flow overrides for the binary's
-        // `call error(nonzero,…)` sites — prune the fall-through so the flow-follower
-        // stops at the no-return call (Ghidra "Subroutine does not return") instead of
-        // walking into the next function and absorbing it. The whole binary's list is
-        // passed; only sites this function's flow actually visits are applied. Empty
-        // unless the Listing + `noreturn_error` are on (so `kuna functions`/console are
-        // unaffected).
-        let flow_ovr: Vec<(kuna_base::address::Address, kuna_base::types::uint4)> =
-            match entry.get_space() {
-                Some(space) if !prog.arch().error_noreturn_callsites.is_empty() => prog
-                    .arch()
-                    .error_noreturn_callsites
-                    .iter()
-                    .map(|&off| {
-                        (
-                            kuna_base::address::Address::new(std::rc::Rc::clone(space), off),
-                            kuna_decomp::overrides::flow_type::CALL_RETURN,
-                        )
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
         // (kuna, DIV-66) The SHARED per-function decompile step — the same one
         // `IfcDecompile` runs. Before it existed this loop called the drive
         // directly and so skipped Ghidra's `FormatStringAnalyzer` half-B loop (and
@@ -734,12 +712,6 @@ pub fn decompile_pulled(
         // (kuna `protoorder`) `entry` is consumed by the symbol-scoped second
         // decompile below; the park needs the address afterwards.
         let park_entry = entry.clone();
-        // (kuna `--assert`) A caller-stated `flow` reclassification is appended
-        // AFTER the derived no-return prunes, so it wins the map insert at an
-        // address both name (`Override::insertFlowOverride` is a map store):
-        // what the caller declared outranks what analysis inferred.
-        let mut flow_ovr = flow_ovr;
-        flow_ovr.extend(seed.flow_overrides.iter().cloned());
         let replay = crate::assertions::has_symbol_scoped(prog, &name, single_target);
         prog.arch_mut().kuna_record_names = replay;
         let step = crate::decompile_step::decompile_one(
@@ -754,7 +726,7 @@ pub fn decompile_pulled(
                 dynamic_symbols: &[],
                 object_assertions: &[],
                 pending_proto: seed.pending_proto.as_ref(),
-                flow_overrides: &flow_ovr,
+                flow_overrides: &seed.flow_overrides,
                 mapped_params: &seed.mapped_params,
             },
             &seed.proto_overrides,
@@ -789,7 +761,7 @@ pub fn decompile_pulled(
                             dynamic_symbols: &carried_dynamic,
                             object_assertions: &carried_objects,
                             pending_proto: seed.pending_proto.as_ref(),
-                            flow_overrides: &flow_ovr,
+                            flow_overrides: &seed.flow_overrides,
                             mapped_params: &carried_params,
                         },
                         &seed.proto_overrides,

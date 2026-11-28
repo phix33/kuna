@@ -93,7 +93,7 @@ that only ever overwrites an engine `sub_*`/`func_*`/`FUN_*`/`LAB_*` placeholder
 kinds are not installed globally: DWARF stack locals are parked per function and
 re-seeded into each freshly-rebuilt `Funcdata`'s `ScopeLocal` at decompile time (the
 `map addr`/`seed_mapped_symbols` path), and the `error(nonzero,…)` call-site list is
-stashed on the `Architecture` for the per-function flow override (§1.7).
+stashed on the `Architecture` for the call-site no-return check (§1.7).
 
 The console dispatcher in `decompiler/crates/kuna-console/src/engine.rs
 (bootstrap_from_file)` releases its format-probe buffer before entering the
@@ -2450,6 +2450,11 @@ funcsym stream:
   produces nothing rather than guessing at a number that means something else
   there.
 
+  A default-visible function definition in a shared object may be interposed.
+  The loader retains its local address as an ABI-recovery candidate. The
+  read-only fold withholds that address when its prototype carries no-return.
+  Direct calls to the local implementation can still use the body fact.
+
   Applying the relocation is only half of it. `.got` is `SHF_WRITE`, so nothing
   downstream would trust a value read out of it, and the constant fold of
   read-only storage is gated program-wide by `option readonly`
@@ -2715,6 +2720,11 @@ funcsym stream:
   third user of the same "constant by construction, not by policy" exception, and
   the one that needs no loader pass at all — only the section table the loader
   already reports.
+
+  On x86, treating an import slot as the function it names also requires the
+  whole pointer to be in one readable file-backed load segment, either
+  read-only or sealed by RELRO. A writable slot can be reassigned after
+  relocation; reads there retain their ordinary memory semantics.
 
   An ARM immediate too wide for the instruction encoding is not in the
   instruction: the compiler parks it in a **literal pool** in `.text` and loads it
@@ -11826,24 +11836,14 @@ Known no-return stub (`exit`, `abort`, `__stack_chk_fail`) no-return, then the
 stub in front of that one, and so on. Ordinary imports such as `memcpy`,
 `fopen64` and `pthread_once` then truncated every caller at the call.
 
-A call or tail jump through an import's `GLOB_DAT` GOT slot (`call
-*exit@GOTPCREL(%rip)` in a `-fno-plt` build) has no static target in the
-Listing. Both rules therefore read the slot from the instruction's operand
-(`slot_operand`): an indirect CALL or JMP whose operand is exactly one absolute
-memory word, `qword ptr [0x3fd8]` or `dword ptr [0x…]`, names that slot. The
-terminal set also holds every ELF code-import slot
-(`kuna_elfgotimports::function_slots`) that a no-return seed names. The Known
-pass emits the slot's fact beside the stub's (see the known names), and
-`Listing::with_noreturn_seeds` keeps a seed that names no discovered function
-in `noreturn_slots` instead of dropping it. Both rules accept a transfer through
-such a slot as they accept one to a terminal entry. That includes the strict
-rule's tail JMP, which would otherwise be a refused computed jump. The `error`
-recognizer takes the `error`/`error_at_line` slots the same way. Before this, a
-`-fno-plt` wrapper of `exit` was never concluded no-return, so its callers ran on
-into the next function, and `error(1, …)` through the slot kept its
-fall-through. A register-relative operand (an i386 PIC `[EAX + -0x4]`) names no
-address and stays unresolved. A seed that is not an ELF GOT slot (a PE IAT
-entry) is not used.
+An x86 ELF near indirect call or tail jump can reach a Known no-return import
+through a protected `GLOB_DAT` slot. Both propagation rules check the encoded
+memory operand against the import slot. On x86-64, a RIP-relative displacement
+moves with its slot. A fixed executable may also address its slot directly.
+An absolute reference in a shared image, a register-relative operand, or a
+writable slot leaves the transfer unresolved. Only a proven slot jump is
+exempt from the strict rule's computed-jump refusal. A static skip edge on a
+predicated indirect jump leaves its taken target unknown.
 
 The deferred analysis commit also seeds the Listing from function symbols already
 marked no-return, including `option noreturn <name>` applied before `read symbols`.
@@ -11860,27 +11860,18 @@ Two rules fold into the same fixpoint, both Ghidra-derived:
 
 - **The `error(nonzero,…)` value rule** (DIV-16, under `noreturn_known`): glibc `error()`
   and `error_at_line()` exit when `status != 0` but return for `status == 0`, so
-  `error` can never be a Known name. The recognizer resolves the `error` entry
-  addresses, then per call site backward-scans the straight-line predecessors for
-  the defining write of the first integer-argument register (x86-64 SysV
-  `EDI`/`RDI`): only a literal `MOV` of a nonzero constant accepts; `XOR EDI,EDI`,
-  any non-constant definition, an intervening call or branch all reject — a false
-  positive would delete live caller code. A qualifying *tail* call concludes the
-  wrapper no-return (GNU `pfatal_with_name`), and independently *every* qualifying
-  call site is emitted as a `no_fallthru_calls` fact that the drivers apply as a
-  per-site CALL_RETURN flow override
-  (`decompiler/crates/kuna-cli/src/decompile_all.rs`) — the fall-through prune that
-  stops the flow-follower from absorbing the next function.
+  the recognizer matches the exact ELF names on x86-64 SysV. A direct call to
+  the function or its PLT entry, or a call through its proven import slot,
+  requires a reaching literal definition of EDI or RDI with a nonzero low
+  32-bit word. Each predecessor must fall through directly, within the
+  function, with no other incoming control-flow edge. The scan stops at
+  partial writes, calls, branches, and instructions whose writes it cannot
+  account for, including secondary and implicit register destinations.
+  A qualifying tail call can conclude a wrapper no-return. At a qualifying
+  call site, flow inserts the same no-return halt used for a known terminal
+  callee. Only this call's prototype receives the site fact. The enclosing
+  function derives its return value from its reachable returns.
 
-  These scans read through a borrowed view of the existing Listing, bounded to
-  `[function entry, next function entry)`, instead of copying each function's
-  instructions into temporary collections. The strict call-site scan keeps its
-  address-order predecessor rule: a gap between decoded instructions does not by
-  itself stop the scan, but instructions from the preceding function are out of
-  bounds. The reachability scan keeps the stricter straight-line rule from its
-  former predecessor window: every step must have an explicit fall-through to
-  the next instruction, so a gap breaks the argument proof. Both reject an
-  intervening call, branch, or terminal instruction before accepting a constant.
 - **CFG reachability** (`noreturn_reach`, DIV-19; the
   `targetOnlyCallsNoReturn` rule of Ghidra's discovered analyzer,
   `function_reaches_only_noreturn`): the tail rule is a subset — it cannot conclude
