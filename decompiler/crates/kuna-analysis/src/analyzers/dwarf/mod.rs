@@ -203,6 +203,13 @@ fn call_frame_cfa(arch: object::Architecture) -> Option<i64> {
 /// function signatures from the program's `.debug_*` sections.
 pub struct DwarfPass;
 
+#[derive(Clone, Copy, PartialEq)]
+enum ResultOrigin {
+    Direct,
+    Local(usize),
+    Unresolved,
+}
+
 /// A flattened snapshot of one DIE's attributes (the subset this pass reads).
 ///
 /// We snapshot the whole compilation unit into an offset-keyed map up front
@@ -220,6 +227,9 @@ struct DieSnap {
     /// The linkage name is the pre-DWARF-4 `DW_AT_MIPS_linkage_name`, which
     /// only MIPS import declarations read.
     legacy_linkage_name: bool,
+    /// Whether the source spelling is unchanged by display-name escaping.
+    verbatim_subprogram_name: bool,
+    file_scope_c_name: bool,
     external: Option<bool>,
     /// `DW_AT_low_pc` resolved to a VMA, if present (marks a *defined* function).
     low_pc: Option<u64>,
@@ -272,6 +282,8 @@ struct DieSnap {
     prototyped: bool,
     /// Fixed C/C++ declaration with a normal calling convention and no inherited signature.
     fixed_declaration: bool,
+    /// The local origin of an inherited result, if the reference can be followed.
+    result_origin: ResultOrigin,
     cpp_declaration: bool,
     has_type_attribute: bool,
     /// True if the DIE carries a `DW_AT_location` (a global var has a real address).
@@ -312,6 +324,8 @@ impl DieSnap {
             linkage_name: String::new(),
             has_linkage_name: false,
             legacy_linkage_name: false,
+            verbatim_subprogram_name: false,
+            file_scope_c_name: false,
             external: None,
             low_pc: None,
             type_ref: None,
@@ -331,6 +345,7 @@ impl DieSnap {
             declaration: false,
             prototyped: false,
             fixed_declaration: false,
+            result_origin: ResultOrigin::Direct,
             cpp_declaration: false,
             has_type_attribute: false,
             has_location: false,
@@ -388,6 +403,7 @@ fn snapshot_unit_with_go(
     // Parent stack of (offset, depth) to attach children to their parent.
     let mut stack: Vec<(usize, isize)> = Vec::new();
     let mut language = None;
+    let mut c_unit = false;
     let escape_names = symbolnamechars_mode() != NameChars::Off;
     let mut cursor = unit.entries();
     loop {
@@ -408,6 +424,8 @@ fn snapshot_unit_with_go(
                 Some(gimli::AttributeValue::Language(value)) => Some(value),
                 _ => None,
             };
+            c_unit = matches!(language, Some(gimli::DW_LANG_C | gimli::DW_LANG_C89
+                | gimli::DW_LANG_C99 | gimli::DW_LANG_C11 | gimli::DW_LANG_C17));
         }
 
         // Pop the parent stack back to this DIE's parent level.
@@ -445,6 +463,8 @@ fn snapshot_unit_with_go(
             if let Ok(s) = dwarf.attr_string(unit, val) {
                 if let Ok(s) = std::str::from_utf8(s.slice()) {
                     snap.name = die_name(s, depth, escape_names);
+                    snap.verbatim_subprogram_name = snap.tag == gimli::DW_TAG_subprogram && snap.name == s;
+                    snap.file_scope_c_name = snap.verbatim_subprogram_name && c_unit && depth == 1;
                 }
             }
         }
@@ -527,8 +547,7 @@ fn snapshot_unit_with_go(
         // C++ functions are prototyped by the language. Producers normally
         // omit the C-specific flag, including for extern "C" declarations.
         let prototyped_language = match language {
-            Some(gimli::DW_LANG_C | gimli::DW_LANG_C89 | gimli::DW_LANG_C99
-                | gimli::DW_LANG_C11 | gimli::DW_LANG_C17) => snap.prototyped,
+            _ if c_unit => snap.prototyped,
             Some(gimli::DW_LANG_C_plus_plus | gimli::DW_LANG_C_plus_plus_03
                 | gimli::DW_LANG_C_plus_plus_11 | gimli::DW_LANG_C_plus_plus_14
                 | gimli::DW_LANG_C_plus_plus_17 | gimli::DW_LANG_C_plus_plus_20) => {
@@ -537,9 +556,18 @@ fn snapshot_unit_with_go(
             }
             _ => false,
         };
+        if snap.tag == gimli::DW_TAG_subprogram {
+            snap.result_origin = match entry.attr_value(gimli::DW_AT_specification)
+                .or_else(|| entry.attr_value(gimli::DW_AT_abstract_origin)) {
+                None => ResultOrigin::Direct,
+                Some(gimli::AttributeValue::UnitRef(off)) => ResultOrigin::Local(off.0),
+                Some(gimli::AttributeValue::DebugInfoRef(off)) => off.to_unit_offset(&unit.header)
+                    .map_or(ResultOrigin::Unresolved, |off| ResultOrigin::Local(off.0)),
+                _ => ResultOrigin::Unresolved,
+            };
+        }
         snap.fixed_declaration = prototyped_language && snap.declaration && snap.tag == gimli::DW_TAG_subprogram
-            && entry.attr_value(gimli::DW_AT_specification).is_none()
-            && entry.attr_value(gimli::DW_AT_abstract_origin).is_none()
+            && snap.result_origin == ResultOrigin::Direct
             && matches!(entry.attr_value(gimli::DW_AT_calling_convention),
                 None | Some(gimli::AttributeValue::CallingConvention(gimli::DW_CC_normal)));
         if let Some(loc) = entry.attr_value(gimli::DW_AT_location) {
@@ -1244,7 +1272,7 @@ impl DwarfPass {
         let mips_imports = crate::loader::kuna_mipsabi::is_mips(ctx.file.architecture())
             && !linkage_imports.is_empty();
         let linked_calls = if mips_imports { kuna_mipsimportdecl::linked_calls(ctx.file) } else { BTreeMap::new() };
-        let mut void_declarations = crate::pass::MipsImportDeclarations::default();
+        let mut void_declarations = kuna_mipsimportdecl::Declarations::default();
         let linkage_definitions = kuna_dwarflinkage::definitions(ctx, &linkage_imports);
         let go_target = ctx.file.is_little_endian() && ctx.file.architecture() == object::Architecture::X86_64;
         let mut go_facts = kuna_godwarfsig::Facts::default();
@@ -1270,10 +1298,10 @@ impl DwarfPass {
             for (offset, snap) in &dies {
                 match snap.tag {
                     gimli::DW_TAG_subprogram => {
-                        if snap.declaration && snap.has_linkage_name
-                            && witnessed.get(offset) == Some(&Some(snap.linkage_name.as_str())) {
-                            kuna_mipsimportdecl::record(snap, &dies, &linkage_imports, ctx,
-                                complete, &mut void_declarations);
+                        if snap.declaration {
+                            if let Some(Some(target)) = witnessed.get(offset) {
+                                void_declarations.record(target, snap, &dies, &linkage_imports, ctx, complete);
+                            }
                         }
                         // Defined function only: DW_AT_low_pc present and not a
                         // declaration-only DIE (DWARFFunction.read body-ranges guard).
@@ -1389,7 +1417,7 @@ impl DwarfPass {
             }
             go_facts.append_unit(dies, go);
         }
-        out.mips_import_declarations = void_declarations;
+        out.mips_import_declarations = void_declarations.finish(&linkage_imports);
         if !go_facts.is_empty() {
             out.go_dwarf.push(go_facts);
         }

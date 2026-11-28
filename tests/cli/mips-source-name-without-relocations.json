@@ -1,0 +1,35 @@
+{
+  "schema": "re-probe/1",
+  "kind": "cli",
+  "cmd": [
+    "{{KUNA}}",
+    "decompile",
+    "{{BIN}}",
+    "forward"
+  ],
+  "cwd": "{{WORK}}",
+  "env": {
+    "SLEIGHHOME": "{{SPECS}}"
+  },
+  "stdin": null,
+  "timeout_s": 60,
+  "repeat": 1,
+  "target": {
+    "binary_rel": "tests/fixtures/mips-import-flow/source-name/ordinary.so",
+    "binary_sha256": "1d07fc6343d542bae332f78578b899c18e6b9a8eff3150f789a9cf35c4bcab45",
+    "binary_size": 13048,
+    "binary_source": "in-repo",
+    "in_repo_path": "tests/fixtures/mips-import-flow/source-name/ordinary.so",
+    "selector": "forward",
+    "selector_kind": "name"
+  },
+  "expect": {
+    "exit_code": {
+      "eq": 0
+    },
+    "stdout_matches": [
+      "  observe\\(\\);"
+    ]
+  },
+  "notes": "This ELF has the same code and DWARF call origin as the linked stage fixture. Without the retained call relocations the source declaration leaves import arity open."
+}

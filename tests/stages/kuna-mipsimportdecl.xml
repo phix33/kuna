@@ -124,6 +124,30 @@
   <com>lo fu release_result</com>
   <com>decompile</com>
   <com>print C</com>
+  <com>clear architecture</com>
+  <com>load file tests/fixtures/mips-import-flow/source-name/linked.so</com>
+  <com>read symbols</com>
+  <com>lo fu forward</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu forward_float</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu use_worker</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu use_puts</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu typed</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu variadic</com>
+  <com>decompile</com>
+  <com>print C</com>
+  <com>lo fu profile_variadic</com>
+  <com>decompile</com>
+  <com>print C</com>
   <com>quit</com>
 </script>
 <stringmatch name="MIPSIMPORTDECL: a DW_AT_linkage_name or DW_AT_MIPS_linkage_name declaration forwards both arguments" min="2" max="2">  machine\(a0,a1\);</stringmatch>
@@ -146,4 +170,10 @@
 <stringmatch name="MIPSIMPORTDECL: unsigned enum storage cannot be locked as signed int" min="2" max="2">  unsigned_arg\(0xffffffff\);</stringmatch>
 <stringmatch name="MIPSIMPORTDECL: an unsupported float argument does not acquire the library pointer" min="0" max="0">  strlen\(v1\);</stringmatch>
 <stringmatch name="MIPSIMPORTDECL: naming a stub before reading symbols preserves its caller result" min="1" max="1">  return strlen\(a0 \+ 1,0x3039\) \+ 1;</stringmatch>
+<stringmatch name="MIPSIMPORTDECL: the linked call identifies both arguments of an ordinary C declaration" min="1" max="1">  observe\(x,y\);</stringmatch>
+<stringmatch name="MIPSIMPORTDECL: a profiling-only declaration preserves both arguments and the used result" min="1" max="1">  return worker\(a0,0x1a\) \+ 5;</stringmatch>
+<stringmatch name="MIPSIMPORTDECL: a profiling-only declaration preserves the library pointer and result" min="1" max="1">  return puts\(\(char \*\)\(a0 \+ 4\)\) \+ 1;</stringmatch>
+<stringmatch name="MIPSIMPORTDECL: an inlined profiling-only declaration in a typed unit keeps the call result" min="1" max="1">  return x \+ worker\(x \+ 2,0x1a\) \+ 5;</stringmatch>
+<stringmatch name="MIPSIMPORTDECL: a variadic marker vetoes a competing fixed declaration" min="1" max="1">  vf\(1,2,3\);</stringmatch>
+<stringmatch name="MIPSIMPORTDECL: a profiling-only witness keeps arguments outside a competing fixed arity" min="1" max="1">  profile_var\(1,2,3\);</stringmatch>
 </decompilertest>

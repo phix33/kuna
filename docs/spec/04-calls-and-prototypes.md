@@ -10683,8 +10683,8 @@ of the very symbol that an import's dynamic symbol version ties to glibc
 or pointer parameters no wider than a pointer, which every MIPS ABI passes in
 its first argument registers. A `free` that takes nothing from another library
 compiles to the same call, so neither the import name, an unversioned symbol,
-another library's version, `GLIBC_PRIVATE`, a source-only debug-info
-declaration, nor a console declaration lifts the void exclusion. A fixed DWARF
+another library's version, `GLIBC_PRIVATE`, a debug declaration found only
+by name, nor a console declaration lifts the void exclusion. A fixed DWARF
 declaration tied to a live call by its DWARF origin, return PC and linked
 ELF call relocations is the image's own declaration (`PrototypePieces::void_prototype_source` is
 `VoidPrototypeSource::Declaration`, chapter 01), so its void result binds as

@@ -87,3 +87,23 @@ Set `TMPDIR` to a writable scratch directory. Run `sh abi/build.sh` and
 | `readelf` | `97af8aa8807d5874bb2c1bf1af9b0702bb87d2457f8ec784b143d1ea824b45b4` |
 | `slots/o32-shared.so` | `767f2528e9d3f724dc5bb4e737c064a91fbfae76b9c28162496338311b7f3a47` |
 | `slots/scoped.so` | `5fc4fc93f682f849692ee7c94c4599dccfb2f619ab591f4a142d9cf17bb26f81` |
+
+
+The `source-name` pair contains the same O32 PIC code and DWARF 5 call-site
+origins. The declarations use ordinary C names. Only `linked.so` retains
+the CALL16/JALR relocations. The freestanding `strlen` declaration exercises a
+conflict with a library prototype. A second compilation unit uses Clang
+profiling debug information, which identifies calls to `worker` and `puts`
+while omitting the types and parameters of both returning imports. LLVM
+also inlines the call to `worker` into the typed caller. A C23 variadic
+declaration conflicts with the fixed declaration of `vf`. A profiling-only
+copy exercises the same conflict after the variadic marker is stripped. Rebuild with
+`sh source-name/build.sh` using `CLANG`, `LLC`, `MIPS_LD` and `TMPDIR`
+as above. Set `LLVM_LINK` and `OPT` to LLVM 21.1.8's corresponding tools.
+
+| Tool or output | SHA-256 |
+| --- | --- |
+| llvm-link | `e5a6455cbcc37547a58c5443ef1529f5430bb73cf26dcf37aaacde4ec4aa6516` |
+| opt | `f3a0c71473eb573797c003382bbe096e6a6468f4da5caf406246f2dbb5e86531` |
+| `source-name/linked.so` | `3dfe69e2df1d34d8c9a9631bf3f49029a823a1f8d7a940c749d52932b66296b7` |
+| `source-name/ordinary.so` | `1d07fc6343d542bae332f78578b899c18e6b9a8eff3150f789a9cf35c4bcab45` |

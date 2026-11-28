@@ -231,6 +231,12 @@ leave unrelated imported results intact. Other controls cover legacy MIPS
 linkage names, an unterminated parameter list, floating and multiword inputs,
 versioned imports, a class member and two GOT slots sharing a destination.
 The source and build recipes are in `tests/fixtures/mips-import-flow`.
+The C source-name case forwards two arguments. A CLI probe links the same
+objects without call relocations and checks that the declaration leaves
+arity open. A profiling-only unit in the linked image preserves the
+arguments and results of two returning imports, including a call inlined
+into a typed caller. A C23 variadic declaration keeps all three call arguments
+when another unit gives the same import a fixed prototype.
 
 `kuna-mips-octeon-elf32-o64.xml` loads big-endian Octeon ELF32 images without a
 target: one declaring O64, one declaring no ABI with GCC's `.mdebug.abiO64`

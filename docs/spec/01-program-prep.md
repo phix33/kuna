@@ -12147,14 +12147,25 @@ single undefined-function GOT target when both of the following identify it.
 
 - A live subprogram contains a DWARF 5 call site with a return PC and a
   unit-relative call origin, or the GNU DWARF 4 counterpart. The origin
-  references a declaration with an explicit linkage name, including the
-  legacy MIPS linkage attribute.
+  references the declaration. An explicit linkage name takes precedence,
+  including the legacy MIPS attribute. When that attribute is absent, a
+  file-scope C declaration can match the import by its exact source spelling.
 - At that PC, the final executable or shared object retains an
   `R_MIPS_CALL16` on a GP-relative load into t9 immediately followed by an
   `R_MIPS_JALR` on a classic call through t9. Both relocations name the
   same undefined function as the declaration. A versioned relocation must
   match the dynamic import’s version requirement and stub address. The
   delay slot ends at the recorded return PC.
+
+Locking a source-name declaration also requires a type attribute on the
+declaration or one of its formal parameters. A variadic marker or an untyped
+formal can contradict a fixed signature but cannot establish a void result. Profiling-only DWARF can retain a call origin and
+a prototyped name after dropping the entire signature, even when LTO inlines
+the call into a typed unit. A witnessed declaration that is untyped, truncated
+or outside file-scope C blocks a new source-name prototype for the same import.
+If agreement is incomplete, the source-name witnesses supply neither a
+prototype nor a library veto. Independent linkage-name and library evidence
+still applies.
 
 The declaration must have a complete fixed C or C++ prototype, a normal
 calling convention, a void result (including typedefs), and no inherited
@@ -12164,10 +12175,12 @@ ABI-sized pointers, including C++ references. Explicit alignments must agree
 with the selected model. Floating, complex, aggregate and multiword inputs
 leave argument recovery to the existing model.
 
-A linked, incompatible declaration, including one from a truncated unit,
-vetoes a library void guess for its import. A witnessed void result also
-excludes a conflicting non-void library signature. Conflicting witnessed declarations
-also veto it. A name alone, a discarded call site, or a call without the
+A linked declaration with an explicit linkage name can veto a library void
+guess even when its unit is truncated. An accepted source-name declaration
+uses the same signature checks. An inherited result can establish void
+through a resolved unit-local origin. A missing or cyclic origin leaves the
+result unknown. A witnessed void result excludes a conflicting non-void
+library signature. Conflicting witnessed declarations also veto it. A name alone, a discarded call site, or a call without the
 retained relocations supplies no declaration and casts no veto. Version
 ambiguity and distinct GOT slots sharing a destination preclude binding.
 The analyzer applies proven declarations after mangled-name inference.

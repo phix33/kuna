@@ -1,13 +1,13 @@
 //! Fixed void prototypes for undefined MIPS ELF imports. A call-site DIE and
 //! the linked PIC call must independently identify the same declaration and
 //! symbol. Only witnessed declarations participate in agreement or vetoes.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use kuna_decomp::dtype::{type_metatype, Datatype};
 use kuna_decomp::kuna_gotimportproto::fixed_inputs;
 
-use super::{build_pieces, strip_qualifiers, DieSnap};
+use super::{build_pieces, strip_qualifiers, DieSnap, ResultOrigin};
 use crate::pass::{AnalysisCtx, MipsImportDeclarations};
 
 /// Retained CALL16 and JALR relocations must name the same undefined function
@@ -196,7 +196,70 @@ pub(super) fn witnessed<'a>(
     result
 }
 
-pub(super) fn record(
+/// A source-name prototype needs agreement from every witnessed declaration
+/// of that import. An untyped origin on its own contributes no prototype or
+/// library veto. Keep it until later units have supplied their declarations.
+#[derive(Default)]
+pub(super) struct Declarations {
+    explicit: MipsImportDeclarations,
+    source: MipsImportDeclarations,
+    unresolved_sources: BTreeSet<String>,
+}
+
+impl Declarations {
+    pub(super) fn finish(mut self, imports: &BTreeMap<String, Vec<u64>>) -> MipsImportDeclarations {
+        for (name, candidate) in self.source.by_name {
+            if self.unresolved_sources.contains(&name) {
+                continue;
+            }
+            let Some([entry]) = imports.get(&name).map(Vec::as_slice) else { continue };
+            self.explicit.entries.insert(*entry);
+            if self.source.void_results.contains(&name) {
+                self.explicit.void_results.insert(name.clone());
+            }
+            merge_candidate(&mut self.explicit, name, candidate);
+        }
+        self.explicit
+    }
+
+    pub(super) fn record(
+        &mut self,
+        target: &str,
+        sub: &DieSnap,
+        dies: &BTreeMap<usize, DieSnap>,
+        imports: &BTreeMap<String, Vec<u64>>,
+        ctx: &AnalysisCtx,
+        complete_unit: bool,
+    ) {
+        if sub.external != Some(true) || sub.low_pc.is_some() {
+            return;
+        }
+        let (name, declarations) = if sub.has_linkage_name {
+            (&sub.linkage_name, &mut self.explicit)
+        } else {
+            if !sub.verbatim_subprogram_name || sub.name != target {
+                return;
+            }
+            if !sub.file_scope_c_name || !complete_unit || !has_declared_type(sub, dies) {
+                self.unresolved_sources.insert(sub.name.clone());
+                return;
+            }
+            (&sub.name, &mut self.source)
+        };
+        if name == target {
+            record(name, sub, dies, imports, ctx, complete_unit, declarations);
+        }
+    }
+}
+
+/// A call origin can survive profiling or inlining without any signature.
+fn has_declared_type(sub: &DieSnap, dies: &BTreeMap<usize, DieSnap>) -> bool {
+    sub.has_type_attribute || super::kuna_cppproto::formal_parameters(sub, dies)
+        .iter().any(|off| dies[off].has_type_attribute)
+}
+
+fn record(
+    name: &str,
     sub: &DieSnap,
     dies: &BTreeMap<usize, DieSnap>,
     imports: &BTreeMap<String, Vec<u64>>,
@@ -204,10 +267,6 @@ pub(super) fn record(
     complete_unit: bool,
     declarations: &mut MipsImportDeclarations,
 ) {
-    if sub.external != Some(true) || sub.low_pc.is_some() || !sub.has_linkage_name {
-        return;
-    }
-    let name = &sub.linkage_name;
     let Some(entries) = imports.get(name) else {
         return;
     };
@@ -218,7 +277,7 @@ pub(super) fn record(
     // An unversioned DWARF name cannot choose between their contracts.
     let returns_void = void_result(sub, dies);
     if returns_void {
-        declarations.void_results.insert(name.clone());
+        declarations.void_results.insert(name.to_owned());
     }
     let pieces =
         if complete_unit && import_scope(sub, dies) && sub.fixed_declaration && returns_void {
@@ -255,7 +314,15 @@ pub(super) fn record(
             None
         };
 
-    match declarations.by_name.entry(name.clone()) {
+    merge_candidate(declarations, name.to_owned(), pieces);
+}
+
+fn merge_candidate(
+    declarations: &mut MipsImportDeclarations,
+    name: String,
+    pieces: Option<(u64, kuna_decomp::fspec::PrototypePieces)>,
+) {
+    match declarations.by_name.entry(name) {
         std::collections::btree_map::Entry::Vacant(slot) => {
             slot.insert(pieces);
         }
@@ -351,9 +418,17 @@ fn import_scope<'a>(mut die: &'a DieSnap, dies: &'a BTreeMap<usize, DieSnap>) ->
     die.depth == 1
 }
 
-fn void_result(sub: &DieSnap, dies: &BTreeMap<usize, DieSnap>) -> bool {
+fn void_result<'a>(mut sub: &'a DieSnap, dies: &'a BTreeMap<usize, DieSnap>) -> bool {
+    let mut visited = BTreeSet::new();
+    while !sub.has_type_attribute && sub.result_origin != ResultOrigin::Direct {
+        let ResultOrigin::Local(off) = sub.result_origin else { return false };
+        if !visited.insert(off) { return false; }
+        let Some(origin) = dies.get(&off) else { return false };
+        if origin.tag != gimli::DW_TAG_subprogram { return false; }
+        sub = origin;
+    }
     if !sub.has_type_attribute {
-        return true;
+        return visited.is_empty() || has_declared_type(sub, dies);
     }
     let Some(die) = sub.type_ref.and_then(|off| dies.get(&off)) else {
         return false;
@@ -371,6 +446,41 @@ fn void_result(sub: &DieSnap, dies: &BTreeMap<usize, DieSnap>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_source_candidates_preserve_independent_evidence() {
+        let mut declarations = Declarations::default();
+        let imports = BTreeMap::from([("explicit".to_owned(), vec![4]), ("library".to_owned(), vec![8])]);
+        for (name, addr) in [("explicit", 4), ("library", 8)] {
+            declarations.unresolved_sources.insert(name.to_owned());
+            declarations.source.by_name.insert(name.to_owned(), Some((addr, Default::default())));
+            declarations.source.void_results.insert(name.to_owned());
+            declarations.source.entries.insert(addr);
+        }
+        declarations.explicit.by_name.insert("explicit".to_owned(), Some((4, Default::default())));
+        declarations.explicit.entries.insert(4);
+        let facts = declarations.finish(&imports);
+        assert!(facts.by_name["explicit"].is_some());
+        assert!(!facts.by_name.contains_key("library"));
+        assert!(facts.void_results.is_empty());
+        assert_eq!(facts.entries, BTreeSet::from([4]));
+    }
+
+    #[test]
+    fn an_inherited_result_requires_a_resolved_signature() {
+        let mut sub = DieSnap::new(gimli::DW_TAG_subprogram, 1);
+        sub.result_origin = ResultOrigin::Unresolved;
+        assert!(!void_result(&sub, &BTreeMap::new()));
+        sub.result_origin = ResultOrigin::Local(1);
+        let mut origin = DieSnap::new(gimli::DW_TAG_subprogram, 1);
+        origin.has_type_attribute = true;
+        origin.type_ref = Some(2);
+        let alias = DieSnap::new(gimli::DW_TAG_typedef, 1);
+        let mut dies = BTreeMap::from([(1, origin), (2, alias)]);
+        assert!(void_result(&sub, &dies));
+        dies.insert(1, sub.clone());
+        assert!(!void_result(&sub, &dies));
+    }
 
     #[test]
     fn unresolved_and_cyclic_aliases_do_not_establish_a_void_result() {
